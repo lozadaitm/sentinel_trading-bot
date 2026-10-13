@@ -140,6 +140,8 @@ class SentinelEngine:
         self._next_idle_check = 0
         self.lock_state = LOCK_FREE   # estado del candado de cesta en el tick (spec §5.3)
         self._lock_fail_next_log = 0  # throttle del ERROR de candado fallido
+        self._lock_sl_err_next = 0    # throttle del ERROR de SL no limpiado con candado
+        self._hedge_fail_next = {}    # ticket -> proximo ERROR de "Hedge Lock FALLIDO"
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -379,6 +381,10 @@ class SentinelEngine:
         )
         if not ok:
             rc = getattr(res, "retcode", "sin respuesta del broker")
+            # Se reintenta cada tick, pero el ERROR sale como mucho cada 600 s por ticket.
+            if self.now < self._hedge_fail_next.get(p.ticket, 0):
+                return False
+            self._hedge_fail_next[p.ticket] = self.now + LOCK_FAIL_LOG_EVERY_S
             self.log.write(
                 "ERROR",
                 f"Hedge Lock FALLIDO sobre ticket #{p.ticket} ({p.volume:.2f} lotes). "
@@ -387,6 +393,7 @@ class SentinelEngine:
                 p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
             return False
 
+        self._hedge_fail_next.pop(p.ticket, None)
         # Cobertura confirmada: el par queda registrado en el ledger (quien
         # cubre a quien). Sin este vinculo, un restart re-emparejaria por
         # inferencia y un hedge de un ciclo muerto podria adoptar la OP1 nueva.
@@ -453,6 +460,8 @@ class SentinelEngine:
 
         # Por encima de volume_max se parte en varias patas LOCK (se tratan como bloque).
         vmax = self.b.volume_max()
+        if not vmax or vmax <= 0:
+            vmax = total   # sin tope valido: una sola pata
         remaining = total
         locked = 0.0
         fail_rc = None
@@ -475,9 +484,7 @@ class SentinelEngine:
             self.cycle.set_meta("lock_initial_volume",
                                 round(float(self.cycle.get_meta("lock_initial_volume", 0.0)) + locked, 8))
             # Un SL que saltara cambiaria el neto congelado: se limpian todos.
-            for p in self.b.positions():
-                if p.sl != 0:
-                    self.b.modify_sl(p, 0)
+            self._clear_lock_sls(self.b.positions())
             msg = f"Candado puesto: {locked:.2f} lotes {side}. S={s:.0f} $"
             self.log.write("PROTECCION", msg, lots=locked, balance=self.b.account_balance())
             self.alerts.notify("candado", "INFO", "candado de cesta puesto",
@@ -493,6 +500,22 @@ class SentinelEngine:
             self.alerts.notify("candado_fallido", "CRITICA", "candado de cesta FALLIDO",
                                f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
                                f"({total:.2f} lotes netos).")
+
+    def _clear_lock_sls(self, positions):
+        """Con candado vivo ningun leg propio puede llevar SL (un SL que salte
+        cambia el neto). Idempotente: se llama cada tick; si el broker rechaza
+        la modificacion, ERROR como mucho cada 600 s y se reintenta."""
+        for p in positions:
+            if p.sl == 0:
+                continue
+            res = self.b.modify_sl(p, 0)
+            if res is not None and getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+                if self.now >= self._lock_sl_err_next:
+                    self._lock_sl_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
+                    self.log.write("ERROR",
+                                   f"Candado: no se pudo quitar el SL del ticket #{p.ticket} "
+                                   f"(retcode {getattr(res, 'retcode', '?')}). Se reintenta.",
+                                   balance=self.b.account_balance(), ticket=p.ticket)
 
     def _news_note(self, what):
         """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
@@ -708,8 +731,9 @@ class SentinelEngine:
         # antes realizaria en rojo una entrada que aun debe cubrirse. Se sale ANTES de
         # tocar el cursor para NO consumir presupuesto: los ganadores nuevos se siguen
         # acumulando y quedan disponibles cuando la cesta llega a OP3+.
-        if len(self.b.positions()) < int(self._p("healer_min_core")):
-            return
+        own = self.b.positions()
+        if len(own) - len(self.cycle.lock_legs(own)) < int(self._p("healer_min_core")):
+            return   # profundidad sin contar las patas LOCK (no son cesta)
 
         to_dt = datetime.datetime.utcfromtimestamp(self.now) + datetime.timedelta(minutes=5)
         from_dt = to_dt - datetime.timedelta(days=2)
@@ -1217,8 +1241,11 @@ class SentinelEngine:
         # Candado de cesta (spec §5.3): se evalua ANTES de los subsistemas y el
         # estado se calcula con las posiciones releidas (puede haberse puesto).
         self._maybe_lock()
-        self.lock_state = self._lock_state(self.b.positions())
+        _pos_now = self.b.positions()
+        self.lock_state = self._lock_state(_pos_now)
         frozen = self.lock_state == LOCK_FROZEN
+        if self.lock_state != LOCK_FREE:
+            self._clear_lock_sls(_pos_now)   # cada tick: tambien tras un reinicio
 
         # Subsistemas transversales (CONGELADO: ni Healer ni Unwind)
         if not frozen:
@@ -1335,7 +1362,10 @@ class SentinelEngine:
                 loss_pts = (entry.price_current - entry.price_open) / point
 
             if entry_hedge is None:
-                if loss_pts >= active_hedge_dist:
+                # Con candado vivo no se abren hedges: un Hedge Lock de volumen
+                # completo sobre el LOCK residual invertiria el neto. La red en
+                # AFLOJADO es el re-candado a S < lock_trigger_usd.
+                if loss_pts >= active_hedge_dist and not lock_alive:
                     self._open_hedge(entry)
             else:
                 # Invariante del par: el hedge nunca mas grande que la ENTRY
@@ -1360,7 +1390,7 @@ class SentinelEngine:
         # Red final para lo que el ledger no vio nacer (restarts, cierres
         # manuales): un leg huerfano en rojo mas alla de la distancia de hedge
         # se congela igual que una OP1. Orden protectora: sin pre-filtros.
-        for orphan in self.cycle.naked_orphans(core_positions):
+        for orphan in ([] if lock_alive else self.cycle.naked_orphans(core_positions)):
             if orphan.type == mt5.POSITION_TYPE_BUY:
                 orphan_loss = (orphan.price_open - orphan.price_current) / point
             else:

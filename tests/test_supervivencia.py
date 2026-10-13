@@ -545,6 +545,103 @@ def test_lock_survives_restart():
     check(e2.cycle.get_meta("lock_since") == since, "lock_since se conserva")
 
 
+def _no_signals():
+    from bot import indicators as _ind
+    orig = (_ind.get_h4_structure, _ind.check_m15_breakout)
+    _ind.get_h4_structure = lambda df, use=True: 0
+    _ind.check_m15_breakout = lambda df: 0
+    return _ind, orig
+
+
+def test_lock_sl_cleared_each_tick():
+    """Con candado vivo, cualquier SL propio se limpia en cada tick (p.ej. tras un reinicio)."""
+    from bot import strategy
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=50000.0)
+        entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.20, 4000.0, "SMC Buy Entry", sl=3900.0)
+        _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.20, 4000.0, "Basket Lock")
+        e.on_tick()
+        check(e.lock_state == strategy.LOCK_FROZEN, "ENTRY+LOCK => CONGELADO")
+        check(entry.sl == 0 and not b.orders, f"on_tick congelado limpia el SL (got {entry.sl})")
+        # el broker rechaza la modificacion: ERROR como mucho cada 600 s
+        entry.sl = 3900.0
+        class Rej: retcode = 10006
+        b.modify_sl = lambda p, sl: Rej()
+        for _ in range(5):
+            e.now += 60
+            e.on_tick()
+        errs = [m for t, m in log.events if t == "ERROR" and "no se pudo quitar el SL" in m]
+        check(len(errs) == 1, f"SL no limpiado: 1 ERROR en 5 ticks (got {len(errs)})")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_loose_no_hedges():
+    """R10: en AFLOJADO ni el hedge monitor ni el watchdog abren Hedge Lock."""
+    from bot import strategy
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=50000.0)
+        b._price = 3990.0
+        entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry", profit=-300.0)
+        entry.price_current = 3990.0
+        orphan = _pos(b, 2, mt5.POSITION_TYPE_BUY, 0.01, 4000.0, "manual", profit=-10.0)
+        orphan.price_current = 3990.0
+        _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4000.0, "Basket Lock")
+        e.on_tick()
+        check(e.lock_state == strategy.LOCK_LOOSE, "neto 0.21 con LOCK => AFLOJADO")
+        check(not any(o["comment"] == "Hedge Lock" for o in b.orders),
+              f"AFLOJADO: sin Hedge Lock sobre ENTRY ni huerfano desnudos (got {b.orders})")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_healer_gate_excludes_lock():
+    """R11: la profundidad del Healer no cuenta las patas LOCK."""
+    from bot import ledger
+    e, b, log = _lock_eng(equity=50000.0)
+    entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry", profit=-300.0)
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.30, 4000.0, "Hedge Lock", profit=290.0)
+    _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4000.0, "Basket Lock")
+    e.cycle.sync(b.positions())
+    check(e.cycle.role_of(2) == ledger.ROLE_HEDGE and e.cycle.role_of(3) == ledger.ROLE_LOCK,
+          "ENTRY + HEDGE + LOCK en el ledger")
+    class D: ticket, magic, entry, profit = 900, M15, mt5.DEAL_ENTRY_OUT, 1000.0
+    b.history_deals = lambda a, c: [D()]
+    e._healer_needs_rebaseline = False
+    e.cycle_realized = 5000.0      # protect_cover False: el par no estaria congelado
+    e._check_healing()
+    check(not b.partials, f"2 legs de cesta + LOCK: el Healer no amputa (got {b.partials})")
+
+
+def test_hedge_fail_throttled():
+    """R12: 'Hedge Lock FALLIDO' como mucho una vez cada 600 s por ticket."""
+    e, b, log = _lock_eng()
+    class Rej: retcode = 10019; order = 0
+    b.market_order = lambda *a, **k: Rej()
+    entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4000.0, "SMC Buy Entry", sl=3950.0)
+    for _ in range(5):
+        e.now += 60
+        check(e._open_hedge(entry) is False, "hedge rechazado => False (se reintenta)")
+    n = sum(1 for t, m in log.events if t == "ERROR" and "Hedge Lock FALLIDO" in m)
+    check(n == 1 and entry.sl == 3950.0, f"5 rechazos en 600 s => 1 ERROR y SL intacto (got {n})")
+    e.now += 600
+    e._open_hedge(entry)
+    n = sum(1 for t, m in log.events if t == "ERROR" and "Hedge Lock FALLIDO" in m)
+    check(n == 2, "pasados 600 s se vuelve a loguear")
+
+
+def test_lock_vmax_zero():
+    e, b, log = _lock_eng()
+    b.volume_max = lambda: 0.0
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    e._maybe_lock()
+    check(len(b.orders) == 1 and abs(b.orders[0]["lots"] - 0.34) < 1e-9,
+          f"volume_max 0 => una sola pata de 0.34 (got {b.orders})")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -570,6 +667,11 @@ def main():
     test_lock_clears_trailing_sl()
     test_lock_failure_dedup()
     test_lock_survives_restart()
+    test_lock_sl_cleared_each_tick()
+    test_loose_no_hedges()
+    test_healer_gate_excludes_lock()
+    test_hedge_fail_throttled()
+    test_lock_vmax_zero()
     print("\ntest_supervivencia: TODO OK")
 
 
