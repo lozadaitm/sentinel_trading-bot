@@ -124,6 +124,7 @@ class FakeBroker:
         class R: retcode = mt5.TRADE_RETCODE_DONE
         return R()
     def modify_sl(self, p, sl): p.sl = float(sl); return None
+    def order_check(self, otype, lots): return (True, 0)
     def history_deals(self, a, b): return []
     def trade_allowed(self): return (True, "")
 

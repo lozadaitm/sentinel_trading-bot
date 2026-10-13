@@ -374,6 +374,177 @@ def test_idle_alert():
     check(len(sent) == 1 and "inactivo" in sent[0], f"sin posiciones ni deals => 1 alerta (got {sent})")
 
 
+# ----------------------------------------------------------------------
+# Candado de cesta (spec §5.3)
+# ----------------------------------------------------------------------
+def _pos(b, ticket, ptype, vol, price_open, comment, profit=0.0, sl=0.0, t=1_700_000_000):
+    p = FakePos(ticket, ptype, vol, price_open, t, comment, M15, sl)
+    p.profit = profit
+    b._pos.append(p)
+    return p
+
+
+def _lock_eng(equity=5000.0, cfg=None):
+    e, b, log = _eng(equity=equity, cfg=cfg)
+    b._next = 500          # tickets de ordenes nuevas lejos de los de _pos
+    e.now = ts(2026, 8, 19, 6)   # miercoles 06:00 servidor
+    return e, b, log
+
+
+def _rec_alerts(e, log):
+    from bot import alerts
+    sent = []
+    e.alerts = alerts.AlertManager(log, "a@b.c", "x",
+                                   sender=lambda to, s, bd, lg=None: sent.append(s))
+    return sent
+
+
+def test_lock_triggers():
+    from bot import ledger, strategy
+    e, b, log = _lock_eng()
+    sent = _rec_alerts(e, log)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    check(e.surv.s_now() < 150, f"S={e.surv.s_now():.0f} < 150")
+    e._maybe_lock()
+    check(len(b.orders) == 1 and b.orders[0]["type"] == SELL
+          and abs(b.orders[0]["lots"] - 0.34) < 1e-9 and b.orders[0]["comment"] == "Basket Lock",
+          f"orden SELL 0.34 'Basket Lock' (got {b.orders})")
+    lock = [p for p in b._pos if p.comment == "Basket Lock"][0]
+    check(e.cycle.role_of(lock.ticket) == ledger.ROLE_LOCK, "rol LOCK en el ledger")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FROZEN, "estado CONGELADO")
+    check(abs(e.cycle.get_meta("lock_initial_volume") - 0.34) < 1e-9, "lock_initial_volume 0.34")
+    check(e.cycle.get_meta("lock_since") == e.now, "lock_since = now")
+    check(any(t == "PROTECCION" and "Candado puesto: 0.34 lotes SELL. S=147 $" in m
+              for t, m in log.events), "log PROTECCION del candado")
+    check(len(sent) == 1, f"una alerta 'candado' (got {sent})")
+    e._maybe_lock()
+    check(len(b.orders) == 1, "con el neto en 0 no se pone un segundo candado")
+
+    e, b, log = _lock_eng()
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    e._maybe_lock()
+    check(not b.orders, "BUY 0.30 (S=166) => sin candado")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FREE, "estado LIBRE sin patas LOCK")
+
+
+def _tick_eng(equity=5000.0):
+    import pandas as _pd
+    from bot import indicators as _ind
+    from bot.strategy import SentinelEngine
+    e, b, log = _lock_eng(equity=equity)
+
+    def fake_buffers():
+        e.atr0 = e.atr1 = 2.0
+        e.ema0, e.rsi0 = b._price, 50.0
+        e.m5_open1 = e.m5_close1 = b._price
+        e.df_m15 = _pd.DataFrame({"high": [b._price + 0.5], "low": [b._price - 0.5]})
+        e.df_h4 = e.df_m15
+        return True
+    e._compute_buffers = fake_buffers
+    _ind_orig = (_ind.get_h4_structure, _ind.check_m15_breakout)
+    return e, b, log, _ind, _ind_orig
+
+
+def test_frozen_blocks_subsystems():
+    from bot import ledger, strategy
+    e, b, log, _ind, orig = _tick_eng()
+    _ind.get_h4_structure = lambda df, use=True: 0
+    _ind.check_m15_breakout = lambda df: 0
+    try:
+        b._price = 3990.0
+        entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.20, 4000.0, "SMC Buy Entry", profit=-200.0)
+        entry.price_current = 3990.0   # ENTRY desnuda 1000 pts en rojo (> hedge_dist)
+        green = _pos(b, 2, mt5.POSITION_TYPE_BUY, 0.14, 3980.0, "Recovery Buy (V-Shape)", profit=140.0)
+        green.price_current = 3990.0
+        e.cycle.set_meta("ref_lot", 0.01)
+        e.cycle_realized = 1000.0
+        e.on_tick()
+        check([o["comment"] for o in b.orders] == ["Basket Lock"],
+              f"on_tick: solo el candado, sin Hedge Lock sobre la ENTRY (got {b.orders})")
+        check(e.lock_state == strategy.LOCK_FROZEN, "estado del tick CONGELADO")
+        e.on_tick()
+        check(len(b.orders) == 1, "segundo tick congelado: nada nuevo")
+        e._profit_banking()
+        check(green in b._pos and entry in b._pos, "CONGELADO: _profit_banking no cierra nada")
+        ok = e._open_additive(BUY, 0.01, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+        check(not ok and len(b.orders) == 1, "CONGELADO: _open_additive no envia")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_loose_excludes_lock_legs():
+    """AFLOJADO: las patas LOCK son intocables para Unwind y Healer."""
+    from bot import ledger, strategy
+    e, b, log = _lock_eng(equity=50000.0)
+    e.atr0 = 2.0
+    e.cycle.set_meta("ref_lot", 0.01)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry", profit=-50.0)
+    lock = _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.10, 4010.0, "Basket Lock", profit=100.0)
+    lock.price_current = 4000.0
+    e.cycle.sync(b.positions())
+    check(e._lock_state(b.positions()) == strategy.LOCK_LOOSE, "LOCK + neto 0.20 => AFLOJADO")
+    e.lock_state = strategy.LOCK_LOOSE
+    e.cycle_realized = 1000.0
+    e._profit_banking()
+    check(lock in b._pos, "AFLOJADO: el Unwind no cobra la pata LOCK verde")
+    lock.profit = -300.0
+    e.cycle_realized = 5000.0   # protect_cover False: sin el candado, el LOCK seria el peor
+    e._apply_healing(10000.0)
+    check(not any(pp["ticket"] == lock.ticket for pp in b.partials),
+          f"AFLOJADO: el Healer no amputa la pata LOCK (got {b.partials})")
+
+
+def test_lock_clears_trailing_sl():
+    e, b, log = _lock_eng()
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.20, 4000.0, "SMC Buy Entry")
+    rec = _pos(b, 2, mt5.POSITION_TYPE_BUY, 0.14, 4400.0, "Recovery Buy (V-Shape)", sl=4410.0)
+    e.cycle.sync(b.positions())
+    e._maybe_lock()
+    check(len(b.orders) == 1, "candado puesto")
+    check(rec.sl == 0, f"tras el candado la RECOVERY queda sin SL (got {rec.sl})")
+
+
+def test_lock_failure_dedup():
+    e, b, log = _lock_eng()
+    sent = _rec_alerts(e, log)
+    b.order_check = lambda otype, lots: (False, 10019)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    for i in range(5):
+        e.now += 100
+        e._maybe_lock()
+    errs = [m for t, m in log.events if t == "ERROR"]
+    check(not b.orders, "ninguna orden enviada")
+    check(len(errs) == 1 and "Candado FALLIDO (10019). S=147 $." in errs[0],
+          f"un solo ERROR en 5 ticks (got {errs})")
+    check(len(sent) == 1, f"una sola alerta 'candado_fallido' (got {sent})")
+    e.now += 600
+    e._maybe_lock()
+    check(sum(1 for t, _ in log.events if t == "ERROR") == 2, "pasados 600 s se vuelve a loguear")
+
+
+def test_lock_survives_restart():
+    from bot import ledger, strategy
+    from bot.strategy import SentinelEngine
+    e, b, log = _lock_eng()
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    e._maybe_lock()
+    since = e.cycle.get_meta("lock_since")
+    path = e.cycle.path
+    e2 = SentinelEngine(b, FakeLogger())
+    e2.cycle = ledger.CycleLedger(path, FakeLogger())
+    e2.cfg = {"equity_weight": 1.0}
+    e2.now = e.now + 3600
+    e2.cycle.sync(b.positions())
+    check(e2._lock_state(b.positions()) == strategy.LOCK_FROZEN, "tras reinicio: CONGELADO")
+    e2._maybe_lock()
+    check(len(b.orders) == 1, "tras reinicio no se pone un segundo candado")
+    check(e2.cycle.get_meta("lock_since") == since, "lock_since se conserva")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -393,6 +564,12 @@ def main():
     test_dead_account_gate()
     test_stop_out_alert()
     test_idle_alert()
+    test_lock_triggers()
+    test_frozen_blocks_subsystems()
+    test_loose_excludes_lock_legs()
+    test_lock_clears_trailing_sl()
+    test_lock_failure_dedup()
+    test_lock_survives_restart()
     print("\ntest_supervivencia: TODO OK")
 
 

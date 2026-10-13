@@ -243,7 +243,7 @@ class Broker:
         # conservan ambos para que el histórico de bot_logs siga clasificando.
         if c.startswith("Grinder") or c.startswith("M5 "):
             return "GRINDER"
-        if c.startswith("Hedge"):
+        if c.startswith("Hedge") or c.startswith("Basket Lock"):
             return "PROTECCION"
         if c.startswith("Recovery"):
             return "RECOVERY"
@@ -285,6 +285,36 @@ class Broker:
         self.logger.write("ERROR", f"Apertura {side} '{comment}' RECHAZADA (retcode {rc}). "
                                    f"{_RETCODE_AYUDA.get(rc, '')}".strip(),
                           price, lots, bal, ticket=ticket)
+
+    def order_check(self, order_type, lots):
+        """Pre-chequeo del broker (mt5.order_check) de una orden a mercado.
+
+        Devuelve (ok, retcode): ok si el retcode es 0 o TRADE_RETCODE_DONE. No
+        envia nada. En SHADOW_MODE siempre (True, 0). Lo usa el candado de cesta
+        para no mandar una orden que el broker rechazaria por margen.
+        """
+        if self.shadow:
+            return True, 0
+        price = self.ask() if order_type == mt5.ORDER_TYPE_BUY else self.bid()
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": self.symbol,
+            "volume": float(lots),
+            "type": order_type,
+            "price": price,
+            "sl": 0.0,
+            "tp": 0.0,
+            "deviation": 50,
+            "magic": self.magic,
+            "comment": "Basket Lock",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        res = mt5.order_check(request)
+        if res is None:
+            return False, "sin respuesta del broker"
+        rc = getattr(res, "retcode", None)
+        return rc in (0, mt5.TRADE_RETCODE_DONE), rc
 
     def market_order(self, order_type, lots, comment, sl=0.0, tp=0.0):
         """Abre a mercado. `sl`/`tp` en PRECIO (0 = sin stop), como MQL5.

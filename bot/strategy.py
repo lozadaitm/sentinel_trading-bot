@@ -71,6 +71,12 @@ DEFAULTS = {
 for _k, _v in survival.DEFAULTS.items():
     DEFAULTS.setdefault(_k, _v)
 
+# Estados del candado de cesta (spec §5.3)
+LOCK_FREE = "LIBRE"        # sin patas LOCK
+LOCK_FROZEN = "CONGELADO"  # patas LOCK y neto propio 0: nada cambia el neto
+LOCK_LOOSE = "AFLOJADO"    # patas LOCK con neto residual: operativa normal, LOCK intocable
+LOCK_FAIL_LOG_EVERY_S = 600
+
 def _struct_txt(v):
     return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
 
@@ -132,6 +138,8 @@ class SentinelEngine:
         self._next_chk_err_log = 0
         self._next_so_check = 0
         self._next_idle_check = 0
+        self.lock_state = LOCK_FREE   # estado del candado de cesta en el tick (spec §5.3)
+        self._lock_fail_next_log = 0  # throttle del ERROR de candado fallido
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -404,6 +412,88 @@ class SentinelEngine:
             return True
         return False
 
+    # ==============================================================
+    # CANDADO DE CESTA (rol LOCK, spec §5.3)
+    # ==============================================================
+    def _lock_state(self, positions):
+        """LIBRE sin patas LOCK; CONGELADO con LOCK y |neto propio| < step;
+        AFLOJADO con LOCK y neto residual."""
+        if not self.cycle.lock_legs(positions):
+            return LOCK_FREE
+        if abs(survival.net_lots(positions)) < self.b.volume_step() - 1e-9:
+            return LOCK_FROZEN
+        return LOCK_LOOSE
+
+    def _maybe_lock(self):
+        """Pone el candado si el aguante S de la cuenta cae bajo lock_trigger_usd
+        y el neto PROPIO (M15) no es cero: orden contraria por |neto| con comment
+        "Basket Lock", rol LOCK. Orden PROTECTORA: no pasa por _open_additive ni
+        por el gobierno de margen; solo el pre-chequeo del broker (order_check).
+        Con el neto ya en 0 (candado congelado) no hace nada: nunca candado sobre
+        candado. En AFLOJADO cubre solo el neto restante (otra pata LOCK).
+        """
+        positions = self.b.positions()
+        net = survival.net_lots(positions)
+        step = self.b.volume_step()
+        if abs(net) < step - 1e-9:
+            return
+        s = self.surv.s_now()
+        if s >= float(self._p("lock_trigger_usd")):
+            return
+        otype = mt5.ORDER_TYPE_SELL if net > 0 else mt5.ORDER_TYPE_BUY
+        side = "SELL" if otype == mt5.ORDER_TYPE_SELL else "BUY"
+        total = round(round(abs(net) / step) * step, 8)
+
+        if self.b.shadow:
+            if self.now >= self._lock_fail_next_log:
+                self._lock_fail_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
+                self.log.write("SHADOW", f"Candado (sombra): se pondria {total:.2f} lotes {side}. "
+                                         f"S={s:.0f} $", balance=self.b.account_balance())
+            return
+
+        # Por encima de volume_max se parte en varias patas LOCK (se tratan como bloque).
+        vmax = self.b.volume_max()
+        remaining = total
+        locked = 0.0
+        fail_rc = None
+        while remaining >= step - 1e-9:
+            vol = round(min(remaining, vmax), 8)
+            ok, rc = self.b.order_check(otype, vol)
+            if not ok:
+                fail_rc = rc
+                break
+            res = self.b.market_order(otype, vol, "Basket Lock")
+            if not self._register_open(res, ledger.ROLE_LOCK):
+                fail_rc = getattr(res, "retcode", "sin respuesta del broker")
+                break
+            locked = round(locked + vol, 8)
+            remaining = round(remaining - vol, 8)
+
+        if locked > 0:
+            if self.cycle.get_meta("lock_since") is None:
+                self.cycle.set_meta("lock_since", self.now)
+            self.cycle.set_meta("lock_initial_volume",
+                                round(float(self.cycle.get_meta("lock_initial_volume", 0.0)) + locked, 8))
+            # Un SL que saltara cambiaria el neto congelado: se limpian todos.
+            for p in self.b.positions():
+                if p.sl != 0:
+                    self.b.modify_sl(p, 0)
+            msg = f"Candado puesto: {locked:.2f} lotes {side}. S={s:.0f} $"
+            self.log.write("PROTECCION", msg, lots=locked, balance=self.b.account_balance())
+            self.alerts.notify("candado", "INFO", "candado de cesta puesto",
+                               f"{msg}. La cesta queda congelada (neto 0) hasta un rebote "
+                               f"confirmado o la disolucion.")
+            self.lock_state = self._lock_state(self.b.positions())
+
+        if fail_rc is not None and self.now >= self._lock_fail_next_log:
+            self._lock_fail_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
+            free = self.b.margin_free()
+            msg = f"Candado FALLIDO ({fail_rc}). S={s:.0f} $. Margen libre {free:.2f}"
+            self.log.write("ERROR", msg, balance=self.b.account_balance())
+            self.alerts.notify("candado_fallido", "CRITICA", "candado de cesta FALLIDO",
+                               f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
+                               f"({total:.2f} lotes netos).")
+
     def _news_note(self, what):
         """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
         ventana de noticia. En modo observacion es el dato que calibra los
@@ -428,6 +518,8 @@ class SentinelEngine:
         self._last_additive_sent = False
         if self.dead:
             return False
+        if self.lock_state == LOCK_FROZEN:
+            return False   # candado congelado: nada aditivo puede cambiar el neto
         lots = self.surv.fit(order_type, lots, label)
         if lots <= 0:
             return False
@@ -607,6 +699,8 @@ class SentinelEngine:
         """
         if not self._p("use_healer"):
             return
+        if self.lock_state == LOCK_FROZEN:
+            return   # candado congelado: el Healer no toca nada
 
         # Gate de profundidad: el Healer solo ampu­ta en cestas reales (OP3/OP4+).
         # Con OP1 sola (core==1) la cobertura correcta es el Hedge Lock (congela la
@@ -691,6 +785,9 @@ class SentinelEngine:
         # huerfana al par igual (asi murio la OP1s del 11-ago: -1,332 de
         # amputacion financiada por el churn). El par se congela completo.
         pair_frozen = self.cycle.pair_members(positions) if protect_cover else set()
+        # Patas LOCK: intocables SIEMPRE (solo las cierra un aflojado, la
+        # disolucion o un cierre total), independiente de protect_cover.
+        pair_frozen |= {p.ticket for p in self.cycle.lock_legs(positions)}
 
         # Peor leg por DINERO REAL = profit + swap (antes solo miraba p.profit e
         # ignoraba el swap acumulado, que en holds largos puede ser material).
@@ -787,6 +884,8 @@ class SentinelEngine:
         """
         if not self._p("use_unwind_mode"):
             return
+        if self.lock_state == LOCK_FROZEN:
+            return   # candado congelado: no se cobra ninguna pata ni par
         positions = self.b.positions()
         if len(positions) < 2:
             return
@@ -804,6 +903,8 @@ class SentinelEngine:
         atr_mult = float(self._p("unwind_atr_mult"))
         floor = self._move_money(float(self._p("unwind_floor_move_usd")))
         pair_tickets = self.cycle.pair_members(positions)
+        lock_tickets = {p.ticket for p in self.cycle.lock_legs(positions)}
+        pair_tickets |= lock_tickets   # patas LOCK: intocables para el Unwind
 
         best_single = None
         best_pair = None
@@ -825,6 +926,8 @@ class SentinelEngine:
                 best_single, best_pair = p, None
 
         for leg, hedge in self.cycle.pairs(positions):
+            if leg.ticket in lock_tickets or hedge.ticket in lock_tickets:
+                continue
             money = (leg.profit + leg.swap + hedge.profit + hedge.swap
                      - self._round_trip_commission(leg.volume)
                      - self._round_trip_commission(hedge.volume))
@@ -1111,9 +1214,16 @@ class SentinelEngine:
         # promocion de huerfano solitario a ENTRY).
         self.cycle.sync(self.b.positions())
 
-        # Subsistemas transversales
-        self._check_healing()
-        self._profit_banking()
+        # Candado de cesta (spec §5.3): se evalua ANTES de los subsistemas y el
+        # estado se calcula con las posiciones releidas (puede haberse puesto).
+        self._maybe_lock()
+        self.lock_state = self._lock_state(self.b.positions())
+        frozen = self.lock_state == LOCK_FROZEN
+
+        # Subsistemas transversales (CONGELADO: ni Healer ni Unwind)
+        if not frozen:
+            self._check_healing()
+            self._profit_banking()
 
         # Todas las posiciones del magic son cesta core: el grinder salio del
         # Sentinel a su propio proceso (bot/strategy_m5.py), con su propio magic.
@@ -1129,6 +1239,7 @@ class SentinelEngine:
                        if entry is not None else None)
         cycle_legs = self.cycle.cycle_legs(core_positions)
         cycle_count = len(cycle_legs)
+        lock_alive = bool(self.cycle.lock_legs(core_positions))
 
         # Red de seguridad de ciclo (B/C): si NO hay cesta core (cerro por _close_all,
         # stop-out del broker o SL), reinicia el realizado del ciclo y marca rebaseline
@@ -1196,6 +1307,13 @@ class SentinelEngine:
         # Gate de cierre de viernes (usa flags ya calculados al inicio del tick)
         if is_friday_mode and my_positions > 0 and self._basket_net_profit() > 0:
             self._close_all("Viernes Close")
+            return
+
+        # CONGELADO: el trailing de cesta y el viernes (arriba) cierran todo a la
+        # vez; nada mas corre. Ni hedge monitor, _resize_hedge, smart trail,
+        # watchdog de huerfanos, Op1/Op3/Op4 ni trail de Op3: cualquier orden o
+        # SL que salte cambiaria el neto congelado.
+        if frozen:
             return
 
         # Distancia de cobertura vigente (comun al monitor y al watchdog)
@@ -1312,7 +1430,7 @@ class SentinelEngine:
         elif cycle_count >= 3:
             self._check_rescue(cycle_legs)  # RF-D: corre con >=3 legs de ciclo (no solo ==3)
 
-            if self._p("use_op3_trail"):
+            if self._p("use_op3_trail") and not lock_alive:  # sin trail de Op3 con candado vivo
                 # 'Op3' = ultimo leg DEL CICLO (un huerfano o su cobertura,
                 # aunque sean mas recientes, no son el leg a trailear).
                 op3 = None
