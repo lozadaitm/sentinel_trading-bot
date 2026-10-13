@@ -332,9 +332,13 @@ def test_stop_out_alert():
     class D2(D):
         ticket = 90
     deals = [D()]
-    b.history_deals = lambda a, c: list(deals)
+    calls = []
+    b.history_deals = lambda a, c: (calls.append((a, c)), list(deals))[1]
     e.now = 1_700_000_000
     e._check_stop_out()
+    import datetime as _dt
+    f, t = calls[0]
+    check(t - f == _dt.timedelta(days=1) and f <= e._server_dt() <= t, "ventana stop-out: 1 dia y contiene 'ahora' servidor")
     check(len(sent) == 0 and e._last_so_ticket == 77, "primer chequeo solo siembra el ancla (0 alertas)")
     deals.append(D2())
     for i in range(1, 4):
@@ -350,7 +354,8 @@ def test_idle_alert():
     sent = []
     e.alerts = alerts.AlertManager(log, "a@b.c", "x", sender=lambda to, s, bd, lg=None: sent.append(s))
     deals = []
-    b.history_deals = lambda a, c: list(deals)
+    calls = []
+    b.history_deals = lambda a, c: (calls.append((a, c)), list(deals))[1]
     e.now = 1_700_000_000
     e.close_only = True
     e._check_idle()
@@ -363,6 +368,9 @@ def test_idle_alert():
     e.now += 3601
     deals.clear()
     e._check_idle()
+    import datetime as _dt
+    f, t = calls[-1]
+    check(t - f == _dt.timedelta(hours=72) and f <= e._server_dt() <= t, "ventana idle: 72 h y contiene 'ahora' servidor")
     check(len(sent) == 1 and "inactivo" in sent[0], f"sin posiciones ni deals => 1 alerta (got {sent})")
 
 

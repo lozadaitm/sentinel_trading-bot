@@ -992,13 +992,17 @@ class SentinelEngine:
     def _server_dt(self):
         return datetime.datetime.utcfromtimestamp(self.now)
 
+    def _deal_window_end(self):
+        """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min."""
+        return self._server_dt() + datetime.timedelta(minutes=5)
+
     def _check_stop_out(self):
         """Una vez por minuto: deal propio de stop-out ('[so...') nuevo => alerta CRITICA."""
         if self.now < self._next_so_check:
             return
         self._next_so_check = self.now + 60
         try:
-            to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
+            to_dt = self._deal_window_end()
             deals = self.b.history_deals(to_dt - datetime.timedelta(days=1), to_dt)
             magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
             nuevos = [d for d in deals if d.magic == magic
@@ -1031,7 +1035,7 @@ class SentinelEngine:
         try:
             if self.b.positions():
                 return
-            to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
+            to_dt = self._deal_window_end()
             deals = self.b.history_deals(to_dt - datetime.timedelta(hours=72), to_dt)
             magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
             if any(d.magic == magic for d in deals):
