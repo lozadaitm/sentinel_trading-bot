@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from bot import ledger
 from bot.ledger import (ROLE_ENTRY, ROLE_HEDGE, ROLE_ORPHAN, ROLE_RECOVERY,
-                        ROLE_RESCUE, CycleLedger)
+                        ROLE_LOCK, ROLE_RESCUE, CycleLedger)
 
 BUY, SELL = 0, 1
 
@@ -163,6 +163,53 @@ def test_duplicate_entry_adopted_as_recovery():
           "la mas antigua es ENTRY; la duplicada, RECOVERY")
 
 
+def test_lock_role():
+    print("[rol LOCK: no es profundidad de ciclo, ni par, ni se promueve]")
+    check(ledger.role_from_comment("Basket Lock") == ROLE_LOCK, "Basket Lock = LOCK")
+    lg = CycleLedger(path=None)
+    live = [pos(90, BUY, "SMC Buy Entry", t=1), pos(91, SELL, "Hedge Lock", t=2),
+            pos(92, BUY, "Recovery Buy", t=3), pos(93, SELL, "Basket Lock", t=4)]
+    roles = lg.sync(live)
+    check(roles[93] == ROLE_LOCK, "Basket Lock se rehidrata como LOCK")
+    check(len(lg.cycle_legs(live)) == 3, "cycle_legs excluye el LOCK")
+    check([p.ticket for p in lg.lock_legs(live)] == [93], "lock_legs devuelve el LOCK")
+    check(all(93 not in (a.ticket, b.ticket) for a, b in lg.pairs(live)),
+          "el LOCK no forma pares")
+    # LOCK solitario: no se promueve a ENTRY ni cuenta como ciclo
+    lg2 = CycleLedger(path=None)
+    solo = [pos(94, SELL, "Basket Lock", t=1)]
+    r2 = lg2.sync(solo)
+    check(r2[94] == ROLE_LOCK and lg2.entry_pos(solo) is None, "LOCK solitario no se promueve")
+    check(lg2.cycle_legs(solo) == [], "LOCK solitario no es leg de ciclo")
+    # Un hedge desconocido no toma un LOCK como candidato de par
+    lg3 = CycleLedger(path=None)
+    mix = [pos(95, BUY, "Basket Lock", t=1), pos(96, SELL, "Hedge Lock", t=2)]
+    r3 = lg3.sync(mix)
+    check(r3[95] == ROLE_LOCK and lg3.pairs(mix) == [] and lg3.rec[96]["covers"] is None,
+          "hedge desconocido no toma un LOCK como par")
+
+
+def test_meta_persists():
+    print("[meta del ciclo persistido en el JSON]")
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "ledger.json")
+    lg = CycleLedger(path=path)
+    check(lg.get_meta("lock_since") is None and lg.get_meta("x", 7) == 7, "defaults")
+    lg.set_meta("lock_since", 123)
+    check(CycleLedger(path=path).get_meta("lock_since") == 123, "meta sobrevive restart")
+    lg.reset_meta()
+    check(CycleLedger(path=path).meta == {}, "reset_meta lo borra")
+    # JSON antiguo sin "meta"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"positions": {"5": {"role": "ENTRY", "covers": null}}}')
+    old = CycleLedger(path=path)
+    check(old.meta == {} and old.role_of(5) == ROLE_ENTRY, "JSON antiguo carga con meta vacio")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{corrupto")
+    bad = CycleLedger(path=path)
+    check(bad.rec == {} and bad.meta == {}, "corrupto => ledger vacio")
+
+
 def main():
     test_comment_roles()
     test_register_and_pairs()
@@ -172,6 +219,8 @@ def main():
     test_persisted_orphan_not_paired_with_new_entry()
     test_watchdog_cover_pairs_with_orphan()
     test_duplicate_entry_adopted_as_recovery()
+    test_lock_role()
+    test_meta_persists()
     print("\ntest_ledger: TODO OK")
 
 

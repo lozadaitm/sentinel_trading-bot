@@ -39,6 +39,7 @@ ROLE_HEDGE = "HEDGE"
 ROLE_RECOVERY = "RECOVERY"
 ROLE_RESCUE = "RESCUE"
 ROLE_ORPHAN = "ORPHAN"
+ROLE_LOCK = "LOCK"  # candado de cesta: NO es profundidad del ciclo
 
 # Prefijos de comment -> rol (mismos textos que usa strategy al abrir).
 _COMMENT_ROLES = (
@@ -46,6 +47,7 @@ _COMMENT_ROLES = (
     ("Hedge", ROLE_HEDGE),
     ("Recovery", ROLE_RECOVERY),
     ("Sentinel Op 4", ROLE_RESCUE),
+    ("Basket Lock", ROLE_LOCK),  # distinto de "Hedge": ningun prefijo lo solapa
 )
 
 
@@ -64,6 +66,7 @@ class CycleLedger:
         self.path = path
         self.log = logger
         self.rec = {}  # ticket(int) -> {"role": str, "covers": int|None}
+        self.meta = {}  # estado pequeno por ciclo (candado, ref_lot...), persistido
         self._load()
 
     # --------------------------------------------------------------
@@ -78,8 +81,11 @@ class CycleLedger:
                 data = json.load(f)
             self.rec = {int(t): {"role": r["role"], "covers": r.get("covers")}
                         for t, r in data.get("positions", {}).items()}
+            meta = data.get("meta", {})
+            self.meta = dict(meta) if isinstance(meta, dict) else {}
         except (OSError, ValueError, KeyError, TypeError) as e:
             self.rec = {}
+            self.meta = {}
             self._log_write("LEDGER", f"Ledger ilegible ({e}); se rehidrata por comments de MT5.")
 
     def _save(self):
@@ -88,7 +94,8 @@ class CycleLedger:
         tmp = self.path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"positions": {str(t): r for t, r in self.rec.items()}}, f, indent=1)
+                json.dump({"positions": {str(t): r for t, r in self.rec.items()},
+                           "meta": self.meta}, f, indent=1)
             os.replace(tmp, self.path)
         except OSError as e:
             # Best-effort: sin disco el bot sigue; el riesgo es solo un restart.
@@ -105,6 +112,21 @@ class CycleLedger:
         if not ticket:
             return  # SHADOW_MODE o rechazo: no hay ticket real que registrar
         self.rec[int(ticket)] = {"role": role, "covers": int(covers) if covers else None}
+        self._save()
+
+    # --------------------------------------------------------------
+    # Meta por ciclo (claves: ref_lot, rescue_opened, lock_since,
+    # lock_initial_volume, unlock_ref_price, last_unlock_ts, last_dissolve_day)
+    # --------------------------------------------------------------
+    def get_meta(self, key, default=None):
+        return self.meta.get(key, default)
+
+    def set_meta(self, key, value):
+        self.meta[key] = value
+        self._save()
+
+    def reset_meta(self):
+        self.meta = {}
         self._save()
 
     def role_of(self, ticket):
@@ -258,8 +280,12 @@ class CycleLedger:
                         if r["role"] == ROLE_HEDGE and t in live
                         and self.rec.get(r["covers"], {}).get("role") == ROLE_ORPHAN}
         return [p for p in positions
-                if self.role_of(p.ticket) != ROLE_ORPHAN
+                if self.role_of(p.ticket) not in (ROLE_ORPHAN, ROLE_LOCK)
                 and p.ticket not in orphan_cover]
+
+    def lock_legs(self, positions):
+        """Patas vivas del candado de cesta (rol LOCK)."""
+        return [p for p in positions if self.role_of(p.ticket) == ROLE_LOCK]
 
     def naked_orphans(self, positions):
         """Huerfanos vivos SIN hedge que los cubra (objetivo del watchdog)."""
