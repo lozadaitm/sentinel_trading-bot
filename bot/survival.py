@@ -84,83 +84,164 @@ def utc_hour_from_server(ts):
     return ((int(ts) - off * 3600) // 3600) % 24
 
 
+class _Snap:
+    """Foto de la cuenta para UNA evaluacion: posiciones, equity, margen, stop-out y contrato."""
+    __slots__ = ("positions", "equity", "margin", "so", "contract")
+
+    def __init__(self, positions, equity, margin, so, contract):
+        self.positions, self.equity, self.margin = positions, equity, margin
+        self.so, self.contract = so, contract
+
+
+def _s_txt(s):
+    """S para logs: 'inf' con neto 0, 'n/a' si no se pudo evaluar."""
+    if s is None:
+        return "n/a"
+    if s == float("inf"):
+        return "inf"
+    return f"{s:.0f}"
+
+
 class SurvivalGuard:
+    """Calcula S y recorta lotes aditivos. Si MT5 no responde (account_info o
+    positions_get None) S es DESCONOCIDO (None): nunca se confunde con S=0
+    (dispararia un candado en falso) ni con S=inf (dejaria abrir sin tope)."""
+
     def __init__(self, broker, cfg_provider, logger, own_magic):
         self.b = broker
         self._cfg = cfg_provider
         self.log = logger
         self.own_magic = own_magic
-        self._last_logged = None   # dedupe: (label, tipo)
+        self._last_logged = {}   # dedupe del BUDGET: label -> tipo ("recorte"/"bloqueo"/...)
 
     def _p(self, key):
-        return (self._cfg() or {}).get(key, DEFAULTS[key])
+        """Valor de config; None o no numerico cae al DEFAULT (nunca revienta)."""
+        val = (self._cfg() or {}).get(key)
+        if val is None:
+            return DEFAULTS[key]
+        return val
+
+    def _f(self, key):
+        try:
+            return float(self._p(key))
+        except (TypeError, ValueError):
+            return float(DEFAULTS[key])
+
+    def _target(self):
+        """survival_move_usd > 0 (un 0 o negativo dividiria por cero en n_max)."""
+        v = self._f("survival_move_usd")
+        return v if v > 0 else float(DEFAULTS["survival_move_usd"])
 
     # --------------------------------------------------------------
-    def _so(self):
-        return float(self.b.stop_out_levels()[1])
+    def snapshot(self):
+        """UNA lectura de cuenta + posiciones; None si MT5 no respondio."""
+        info = self.b.account_snapshot()
+        if info is None:
+            return None
+        pos = self.b.positions_all_checked()
+        if pos is None:
+            return None
+        try:
+            return _Snap(pos, float(info.equity), float(info.margin),
+                         float(info.margin_so_so), float(self.b.contract_size()))
+        except (AttributeError, TypeError, ValueError):
+            return None
 
-    def s_with_delta(self, delta_net, delta_margin):
-        net = net_lots(self.b.positions_all()) + delta_net
-        margin = max(0.0, self.b.account_margin() + delta_margin)
-        return survival_usd(self.b.account_equity(), margin, self._so(), net,
-                            self.b.contract_size())
+    @staticmethod
+    def _s(snap, delta_net, delta_margin):
+        net = net_lots(snap.positions) + delta_net
+        margin = max(0.0, snap.margin + delta_margin)
+        return survival_usd(snap.equity, margin, snap.so, net, snap.contract)
 
-    def s_now(self):
-        return self.s_with_delta(0.0, 0.0)
+    def s_with_delta(self, delta_net, delta_margin, snap=None):
+        """S tras sumar delta_net al neto y delta_margin al margen. None si desconocido."""
+        snap = snap or self.snapshot()
+        if snap is None:
+            return None
+        return self._s(snap, delta_net, delta_margin)
 
-    def n_max(self):
-        """Neto maximo (lotes) de la cuenta que aun aguanta survival_move_usd."""
-        free = max(0.0, self.b.account_equity() - self._so() * self.b.account_margin() / 100.0)
-        return free / (float(self._p("survival_move_usd")) * self.b.contract_size())
+    def s_now(self, snap=None):
+        return self.s_with_delta(0.0, 0.0, snap)
 
-    def _own_net(self):
-        return net_lots([p for p in self.b.positions_all() if p.magic == self.own_magic])
+    def n_max(self, snap=None):
+        """Neto maximo (lotes) de la cuenta que aun aguanta survival_move_usd. None si desconocido."""
+        snap = snap or self.snapshot()
+        if snap is None:
+            return None
+        free = max(0.0, snap.equity - snap.so * snap.margin / 100.0)
+        return free / (self._target() * snap.contract)
 
     # --------------------------------------------------------------
+    def _budget_log(self, label, kind, msg):
+        """BUDGET deduplicado POR ETIQUETA (alternar etiquetas no re-loguea)."""
+        if self.log is not None and self._last_logged.get(label) != kind:
+            self.log.write("BUDGET", msg, balance=self.b.account_balance())
+            self._last_logged[label] = kind
+
     def fit(self, order_type, requested, label):
-        """Mayor lote <= requested que cabe en el tope; 0.0 si no cabe ninguno."""
+        """Mayor lote <= requested que cabe en el tope; 0.0 si no cabe ninguno
+        o si la cuenta no se pudo leer (desconocido = bloqueado)."""
+        snap = self.snapshot()
+        if snap is None:
+            self._budget_log(label, "no_evaluable",
+                             f"{label} bloqueada: cuenta no evaluable (MT5 sin respuesta). "
+                             f"Se reintenta en el proximo tick.")
+            return 0.0
         sign = 1.0 if order_type == mt5.ORDER_TYPE_BUY else -1.0
-        acct = net_lots(self.b.positions_all())
+        acct = net_lots(snap.positions)
         if abs(acct + sign * requested) < abs(acct) - _EPS:
             return requested    # reduce el neto: no suma riesgo
 
         step = self.b.volume_step()
         vmin = self.b.volume_min()
-        own = self._own_net()
-        cap = float(self._p("equity_weight")) * self.n_max()
-        target = float(self._p("survival_move_usd"))
-        k = int(math.floor(requested / step + _EPS))
+        own = net_lots([p for p in snap.positions if p.magic == self.own_magic])
+        cap = self._f("equity_weight") * self.n_max(snap)
+        target = self._target()
+
+        def ok(k):
+            v = round(k * step, 8)
+            if self._s(snap, sign * v, self.b.order_margin(order_type, v)) < target - _EPS:
+                return False
+            if abs(own + sign * v) > abs(own) + _EPS:
+                return abs(own + sign * v) <= cap + _EPS
+            return True
+
+        # Busqueda binaria (como _maybe_unlock): S cae y |neto| crece con v, asi
+        # que ok(k) es monotona. Acota las llamadas a MT5 (order_calc_margin)
+        # a ~log2(k) en vez de una por step en reintentos bloqueados.
+        k_req = int(math.floor(requested / step + _EPS))
         kmin = max(1, int(math.ceil(vmin / step - _EPS)))
         chosen = 0.0
-        while k >= kmin:
-            v = round(k * step, 8)
-            ok = self.s_with_delta(sign * v, self.b.order_margin(order_type, v)) >= target - _EPS
-            if ok and abs(own + sign * v) > abs(own) + _EPS:
-                ok = abs(own + sign * v) <= cap + _EPS
-            if ok:
-                chosen = v
-                break
-            k -= 1
+        if k_req >= kmin:
+            if ok(k_req):
+                chosen = round(k_req * step, 8)
+            else:
+                lo, hi = kmin - 1, k_req          # invariante: ok(hi) falso; lo ok o kmin-1
+                while hi - lo > 1:
+                    mid = (lo + hi) // 2
+                    if ok(mid):
+                        lo = mid
+                    else:
+                        hi = mid
+                if lo >= kmin:
+                    chosen = round(lo * step, 8)
 
         if chosen >= requested - _EPS:
-            self._last_logged = None
+            self._last_logged.pop(label, None)
             return requested
-        s = self.s_now()
-        s_txt = s if s != float("inf") else 0.0
+        s_txt = _s_txt(self._s(snap, 0.0, 0.0))
         if chosen > 0:
-            key = (label, "recorte")
+            kind = "recorte"
             msg = (f"{label} reducida {requested:.2f} → {chosen:.2f} "
-                   f"por tope de supervivencia (S={s_txt:.0f} $)")
+                   f"por tope de supervivencia (S={s_txt} $)")
         else:
-            key = (label, "bloqueo")
+            kind = "bloqueo"
             msg = (f"{label} bloqueada por tope de supervivencia: no cabe {vmin:.2f} "
-                   f"(S={s_txt:.0f} $)")
-        if self.log is not None and key != self._last_logged:
-            self.log.write("BUDGET", msg, balance=self.b.account_balance())
-            self._last_logged = key
+                   f"(S={s_txt} $)")
+        self._budget_log(label, kind, msg)
         return chosen
 
     def s_after_close(self, position):
-        """S de la cuenta si se cerrara `position` (el margen liberado cuenta)."""
+        """S de la cuenta si se cerrara `position` (el margen liberado cuenta). None si desconocido."""
         contrib = position.volume if position.type == mt5.POSITION_TYPE_BUY else -position.volume
         return self.s_with_delta(-contrib, -self.b.order_margin(position.type, position.volume))

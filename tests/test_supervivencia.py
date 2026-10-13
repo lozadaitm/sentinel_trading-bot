@@ -27,12 +27,12 @@ class SurvBroker(FakeBroker):
         self._equity = equity
         self._mpl = 0.0   # margen por lote
 
-    def positions(self): return [p for p in self._pos if p.magic == self.magic]
-    def positions_all(self): return list(self._pos)
-    def account_equity(self): return self._equity
-    def account_margin(self): return self._margin
+    def positions(self): return [] if self.pos_fail else [p for p in self._pos if p.magic == self.magic]
+    def positions_all(self): return [] if self.pos_fail else list(self._pos)
+    def account_equity(self): return None if self.acct_fail else self._equity
+    def account_margin(self): return None if self.acct_fail else self._margin
     def order_margin(self, otype, lots): return lots * self._mpl if lots > 0 else 0.0
-    def stop_out_levels(self): return (100.0, 50.0)
+    def stop_out_levels(self): return None if self.acct_fail else (100.0, 50.0)
     def contract_size(self): return 100.0
 
 
@@ -1044,6 +1044,317 @@ def test_dissolve_wired_in_tick():
         _ind.get_h4_structure, _ind.check_m15_breakout = orig
 
 
+# ----------------------------------------------------------------------
+# Ola de fixes de la revision final (final-findings.md)
+# ----------------------------------------------------------------------
+def test_broker_signals_unknown():
+    """F1/F2: el Broker real distingue 'MT5 no respondio' (None) de 0.0 / lista vacia."""
+    from bot import broker as brk
+    b = brk.Broker(FakeLogger())
+    orig = (mt5.account_info, mt5.positions_get)
+    try:
+        mt5.account_info = lambda: None
+        check(b.account_equity() is None and b.account_margin() is None,
+              "account_info None => equity/margen None (desconocido, no 0.0)")
+        check(b.stop_out_levels() is None and b.account_snapshot() is None,
+              "account_info None => stop_out_levels/account_snapshot None")
+        check(b.account_balance() == 0.0, "account_balance (solo para logs) sigue en 0.0")
+        mt5.positions_get = lambda **k: None
+        check(b.positions_all_checked() is None and b.positions_checked() is None,
+              "positions_get None => lectura chequeada None")
+        check(b.positions_all() == [], "positions_all conserva [] para los llamadores legados")
+        mt5.positions_get = lambda **k: ()
+        check(b.positions_all_checked() == [] and b.positions_checked() == [],
+              "positions_get () => vacio confirmado []")
+    finally:
+        mt5.account_info, mt5.positions_get = orig
+
+
+def test_unknown_account_is_not_evaluable():
+    """F1: un account_info() None NO es S=0: ni candado, ni aditivas, ni cuenta muerta."""
+    from bot import alerts, ledger
+    e, b, log = _lock_eng(equity=5000.0)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.20, 4000.0, "SMC Buy Entry")   # S real = 250
+    e.cycle.sync(b.positions())
+    b.acct_fail = True
+    check(e.surv.s_now() is None, "s_now None con la cuenta no evaluable")
+    check(e.surv.s_with_delta(0.01, 0.0) is None, "s_with_delta None")
+    check(e.surv.n_max() is None, "n_max None")
+    check(e.surv.s_after_close(b._pos[0]) is None, "s_after_close None")
+    e._maybe_lock()
+    check(not b.orders, f"sin Basket Lock por una lectura fallida (got {b.orders})")
+    v1 = e.surv.fit(BUY, 0.05, "Recovery")
+    v2 = e.surv.fit(BUY, 0.05, "Recovery")
+    n = sum(1 for t, m in log.events if t == "BUDGET" and "no evaluable" in m)
+    check(v1 == 0.0 and v2 == 0.0 and n == 1, f"fit bloquea (0.0) y loguea BUDGET una vez (got {v1}, {n})")
+    ok = e._open_additive(BUY, 0.05, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    check(not ok and not b.orders, "ninguna aditiva con la cuenta no evaluable")
+    check(alerts.account_dead(b) == (False, ""), "account_dead: no evaluable != muerta")
+    sent = _rec_alerts(e, log)
+    alerts.update_dead(e)
+    check(e.dead is False and not sent and not any(t == "ERROR" and "CUENTA MUERTA" in m
+                                                   for t, m in log.events),
+          "update_dead no marca muerta ni manda CRITICA")
+    check(e.gov.sizing_equity() == 0.0, "sizing_equity 0.0 con equity desconocido")
+    check(e.gov.can_open(0.01, BUY) is False, "el gobierno bloquea la aditiva con equity desconocido")
+    # Posiciones no leibles: tambien desconocido.
+    b.acct_fail, b.pos_fail = False, True
+    check(e.surv.s_now() is None and e.surv.fit(BUY, 0.05, "Entry") == 0.0,
+          "positions_get None => S desconocido y fit 0.0")
+    # Aflojado: el rebote no afloja si la cuenta no se puede leer.
+    e, b, log = _unlock_setup(4451.0)
+    b.acct_fail = True
+    e._maybe_unlock()
+    check(not b.partials and _lock_vol(e, b) == 0.34, f"sin aflojado con cuenta no evaluable (got {b.partials})")
+    # HUD: equity desconocido => n/a, sin romper.
+    from bot import tui
+    check(tui.fmt_money(None) == "n/a" and tui.fmt_money(12.5) == "12.50", "TUI muestra n/a")
+
+
+def test_positions_read_failure_skips_tick():
+    """F2: un positions_get None no borra la meta del ciclo ni el ledger: el tick se salta."""
+    from bot import ledger
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=5000.0)
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4400.0, "SMC Buy Entry")
+        _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.34, 4400.0, "Basket Lock")
+        b._price = 4400.0
+        e.cycle.sync(b.positions())
+        e.cycle.set_meta("lock_since", e.now - 3600)
+        e.cycle.set_meta("rescue_opened", 3)
+        e.cycle.set_meta("dissolve_pending", {"side": "SELL", "lots": 0.05, "tickets": [2],
+                                              "net_before": 0.0, "x": 0.05})
+        e.cycle_realized = 123.0
+        meta0 = dict(e.cycle.meta)
+        b.pos_fail = True
+        e.on_tick()
+        check(e.cycle.meta == meta0, f"meta intacta tras lectura fallida (got {e.cycle.meta})")
+        check(e.cycle.role_of(2) == ledger.ROLE_LOCK, "el ledger conserva el rol LOCK")
+        check(e.cycle_realized == 123.0 and not b.orders, "realizado intacto y sin ordenes")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_meta_reset_needs_two_empty_reads():
+    """F2: la meta del ciclo solo se reinicia tras DOS lecturas vacias confirmadas seguidas."""
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=5000.0)
+        e.cycle.set_meta("ref_lot", 0.10)
+        e.cycle.set_meta("rescue_opened", 2)
+        e.cycle_realized = 50.0
+        e.on_tick()
+        check(e.cycle.get_meta("rescue_opened") == 2 and e.cycle_realized == 50.0,
+              "primera lectura vacia: nada se reinicia")
+        e.now += 1
+        e.on_tick()
+        check(e.cycle.meta == {} and e.cycle_realized == 0.0, f"segunda vacia: meta {e.cycle.meta}")
+        # Una lectura con posiciones corta la racha: la siguiente vacia vuelve a ser la 1.a.
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4000.0, "SMC Buy Entry")
+        e.on_tick()                         # con posiciones
+        b._pos.clear()
+        e.cycle.set_meta("ref_lot", 0.10)
+        e.on_tick()                         # vacia 1 de nuevo
+        check(e.cycle.get_meta("ref_lot") == 0.10, "la racha se reinicia con una lectura no vacia")
+        # Una lectura FALLIDA (None) no cuenta como vacia confirmada.
+        b.pos_fail = True
+        e.on_tick()
+        b.pos_fail = False
+        check(e.cycle.get_meta("ref_lot") == 0.10, "una lectura fallida no completa la racha")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_lock_since_backfilled():
+    """F2: patas LOCK vivas sin lock_since => se rellena con la pata LOCK mas vieja."""
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=50000.0)
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry")
+        _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.20, 4000.0, "Basket Lock", t=1_700_000_500)
+        _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4000.0, "Basket Lock", t=1_700_000_000)
+        b._price = 4000.0
+        e.on_tick()
+        check(e.cycle.get_meta("lock_since") == 1_700_000_000,
+              f"lock_since = time de la pata LOCK mas vieja (got {e.cycle.get_meta('lock_since')})")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_fit_bisect_few_reads():
+    """F3: fit lee la cuenta una vez y busca en binario (pocas llamadas a MT5)."""
+    b = SurvBroker()
+    add(b, BUY, 0.05)
+    calls = {"snap": 0, "pos": 0, "om": 0}
+    o_snap, o_pos, o_om = b.account_snapshot, b.positions_all_checked, b.order_margin
+
+    def snap():
+        calls["snap"] += 1
+        return o_snap()
+
+    def pos():
+        calls["pos"] += 1
+        return o_pos()
+
+    def om(t, v):
+        calls["om"] += 1
+        return o_om(t, v)
+    b.account_snapshot, b.positions_all_checked, b.order_margin = snap, pos, om
+    g, _ = guard(b)
+    v = g.fit(BUY, 5.00, "Recovery")
+    check(abs(v - 0.15) < 1e-9, f"5.00 con neto 0.05 => 0.15 (got {v})")
+    check(calls["snap"] == 1 and calls["pos"] == 1, f"una sola lectura de cuenta/posiciones (got {calls})")
+    check(calls["om"] <= 12, f"busqueda binaria: <= 12 order_margin (got {calls['om']})")
+
+
+def test_relock_restarts_dissolve_clock():
+    """F4: re-candado 30 h despues de un aflojado reinicia el plazo de 24 h de la disolucion."""
+    e, b, log = _lock_eng(equity=3000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4400.0, "SMC Buy Entry", profit=-100.0)
+    _pos(b, 2, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "Recovery Buy (V-Shape)", profit=-50.0)
+    _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.20, 4400.0, "Basket Lock", profit=40.0)
+    b._price = 4400.0
+    e.cycle.sync(b.positions())
+    e.cycle.set_meta("lock_since", e.now - 48 * 3600)
+    e.cycle.set_meta("last_unlock_ts", e.now - 30 * 3600)
+    e.cycle.set_meta("lock_initial_volume", 0.34)
+    e._maybe_lock()     # neto +0.24, S = 3000/24 = 125 < 150 => re-candado
+    check(b.orders and b.orders[-1]["comment"] == "Basket Lock" and abs(b.orders[-1]["lots"] - 0.24) < 1e-9,
+          f"re-candado SELL 0.24 (got {b.orders})")
+    check(e.cycle.get_meta("lock_ref_ts") == e.now, "lock_ref_ts = now en el re-candado")
+    n0 = len(b.positions())
+    e._maybe_dissolve()
+    check(not b.partials and len(b.positions()) == n0 and e.cycle.get_meta("last_dissolve_day") is None,
+          f"re-candado recien puesto: no se disuelve (got {b.partials})")
+    e.now += 24 * 3600   # 03 UTC del dia siguiente, 24 h despues del re-candado
+    net0 = survival.net_lots(b.positions())
+    e._maybe_dissolve()
+    check(e.cycle.get_meta("last_dissolve_day") is not None and 2 not in {p.ticket for p in b.positions()}
+          and abs(survival.net_lots(b.positions()) - net0) < 1e-9,
+          f"24 h despues del re-candado se disuelve (Recovery #2 + LOCK, neto igual) (got {b.partials})")
+
+
+def test_rescue_target_excludes_lock():
+    """F5: las patas LOCK no cuentan para el '>=4 core' del target de rescate ni la etiqueta."""
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=50000.0)
+        e.cycle.set_meta("ref_lot", 0.10)       # arm 8.3 $, rescate 5.6 $
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4000.0, "SMC Buy Entry")
+        _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.10, 4000.0, "Hedge Lock")
+        rec = _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4000.0, "Recovery Sell (V-Shape)")
+        _pos(b, 4, mt5.POSITION_TYPE_BUY, 0.10, 4000.0, "Basket Lock")
+        b._price = 4000.0
+        e.cycle.sync(b.positions())
+        e.cycle.set_meta("lock_since", e.now)
+        comm = sum(e._round_trip_commission(p.volume) for p in b._pos)
+        rec.profit = 7.0 + comm               # neto de cesta = 7 $: entre 5.6 y 8.3
+        e.on_tick()
+        check(e.cycle_armed is False, "3 core + LOCK: target normal (8.3), no se arma con 7 $")
+        e.cycle_armed, e.max_cycle_peak = True, 1000.0
+        e.now += 1
+        e.on_tick()
+        check(any(t == "EXITO" and "Basket Profit Trail" in m for t, m in log.events),
+              f"etiqueta 'Basket Profit Trail' (no 'Rescue Mission Success') (got {log.events[-3:]})")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_dissolve_done_partial():
+    """F6: un DONE_PARTIAL cuenta lo cerrado de verdad; el segundo miembro iguala ese volumen."""
+    for with_volume in (True, False):
+        e, b, log = _dissolve_setup()
+        orig = b.close_partial
+
+        def partial(p, lots, comment="Partial", orig=orig, with_volume=with_volume):
+            if p.ticket == 3:
+                orig(p, 0.06, comment)
+
+                class R:
+                    retcode = mt5.TRADE_RETCODE_DONE_PARTIAL
+                    volume = 0.06 if with_volume else 0.0
+                return R()
+            return orig(p, lots, comment)
+        b.close_partial = partial
+        net0 = survival.net_lots(b.positions())
+        e._maybe_dissolve()
+        check(abs(survival.net_lots(b.positions()) - net0) < 1e-9,
+              f"DONE_PARTIAL (volume={'si' if with_volume else 'no'}): neto sin cambio "
+              f"(got {survival.net_lots(b.positions())} vs {net0})")
+        check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(3, 0.06), (5, 0.06)],
+              f"segundo miembro cierra 0.06 (got {b.partials})")
+        check(e.cycle.get_meta("dissolve_pending") is None, "sin deuda")
+
+
+def test_tick_isolates_subsystem_errors():
+    """F7: una excepcion en candado/aflojado/disolucion no aborta el tick (hedge monitor corre)."""
+    _ind, orig = _no_signals()
+    try:
+        for name in ("_maybe_lock", "_maybe_unlock", "_maybe_dissolve"):
+            e, b, log, _, _ = _tick_eng(equity=50000.0)
+            entry = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4010.0, "SMC Buy Entry", profit=-100.0)
+            b._price = 4000.0
+            entry.price_current = 4000.0   # 1000 pts en rojo (> hedge_dist)
+
+            def boom():
+                raise ValueError("cfg rota")
+            setattr(e, name, boom)
+            e.on_tick()
+            e.now += 1
+            e.on_tick()
+            check(any(o["comment"] == "Hedge Lock" for o in b.orders),
+                  f"{name} revienta: el hedge monitor igual cubre (got {b.orders})")
+            errs = [m for t, m in log.events if t == "ERROR" and "cfg rota" in m]
+            check(len(errs) == 1, f"{name}: un ERROR (throttle 600 s) (got {len(errs)})")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+    # SurvivalGuard: valores None o survival_move_usd <= 0 caen a DEFAULTS.
+    for cfg in ({"survival_move_usd": None, "equity_weight": None}, {"survival_move_usd": 0}):
+        b = SurvBroker()
+        add(b, BUY, 0.05)
+        g = survival.SurvivalGuard(b, lambda cfg=cfg: cfg, FakeLogger(), M15)
+        v = g.fit(BUY, 0.20, "Recovery")
+        check(abs(v - 0.15) < 1e-9 and abs(g.n_max() - 0.20) < 1e-9,
+              f"cfg {cfg}: usa los DEFAULTS (fit 0.15, n_max 0.20) (got {v})")
+
+
+def test_budget_dedupe_per_label():
+    """F8: el dedupe del BUDGET es por etiqueta: alternar etiquetas no re-loguea."""
+    b = SurvBroker()
+    add(b, BUY, 0.196)
+    g, log = guard(b)
+    for label in ("Recovery", "Rescue", "Recovery", "Rescue"):
+        g.fit(BUY, 0.20, label)
+    n = sum(1 for t, m in log.events if t == "BUDGET")
+    check(n == 2, f"dos etiquetas bloqueadas => 2 BUDGET (got {n})")
+
+
+def test_budget_log_s_inf():
+    """F9: con neto 0 (S infinito) el log dice S=inf, no S=0."""
+    b = SurvBroker(equity=10.0)
+    g, log = guard(b)
+    v = g.fit(BUY, 0.05, "Entry")
+    msgs = [m for t, m in log.events if t == "BUDGET"]
+    check(v == 0.0 and msgs and "S=inf $" in msgs[0], f"log con S=inf (got {msgs})")
+
+
+FIX_WAVE = [
+    test_broker_signals_unknown,
+    test_unknown_account_is_not_evaluable,
+    test_positions_read_failure_skips_tick,
+    test_meta_reset_needs_two_empty_reads,
+    test_lock_since_backfilled,
+    test_fit_bisect_few_reads,
+    test_relock_restarts_dissolve_clock,
+    test_rescue_target_excludes_lock,
+    test_dissolve_done_partial,
+    test_tick_isolates_subsystem_errors,
+    test_budget_dedupe_per_label,
+    test_budget_log_s_inf,
+]
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -1091,6 +1402,8 @@ def main():
     test_dissolve_both_sides_free()
     test_dissolve_exhausts_lock()
     test_dissolve_wired_in_tick()
+    for t in FIX_WAVE:
+        t()
     print("\ntest_supervivencia: TODO OK")
 
 

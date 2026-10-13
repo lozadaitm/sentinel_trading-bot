@@ -98,7 +98,10 @@ class MarginGovernor:
         Los motores dimensionan el lote contra esto en vez de contra el equity
         completo, para que dos bots no escalen ambos sobre el mismo capital.
         """
-        return self.b.account_equity() * float(self._p("equity_weight"))
+        equity = self.b.account_equity()
+        if equity is None:
+            return 0.0   # MT5 sin respuesta: sin capital conocido (el lote cae al minimo y fit bloquea)
+        return equity * float(self._p("equity_weight"))
 
     def posture(self):
         """Postura actual segun el margin level de la cuenta."""
@@ -187,7 +190,10 @@ class MarginGovernor:
         #    este bot aunque haya margen libre de sobra.
         cap_pct = float(self._p("margin_cap_pct"))
         if cap_pct > 0:
-            cap = self.b.account_equity() * cap_pct / 100.0
+            equity = self.b.account_equity()
+            if equity is None:
+                return self._block("equity no disponible (MT5 sin respuesta)")
+            cap = equity * cap_pct / 100.0
             own = self.b.own_margin()
             if own + required > cap:
                 return self._block(

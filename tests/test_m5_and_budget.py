@@ -48,6 +48,9 @@ from bot import budget, config
 from bot.strategy_m5 import M5Engine
 
 config.ALERT_EMAIL_TO = ""   # los tests nunca deben mandar correos reales (AlertManager queda no-op)
+# Los motores de test nunca escriben el ledger real de la instancia (instances/...).
+import os as _os_ledger, tempfile as _tmp_ledger
+config.LEDGER_PATH = _os_ledger.path.join(_tmp_ledger.mkdtemp(), "cycle_ledger_test.json")
 
 
 class FakePos:
@@ -74,6 +77,8 @@ class FakeBroker:
         self.ml = float("inf")
         self._free = 9000.0
         self._margin = 0.0
+        self.acct_fail = False   # simula mt5.account_info() == None (lectura fallida)
+        self.pos_fail = False    # simula mt5.positions_get() == None (lectura fallida)
     # specs
     def point(self): return 0.01
     def digits(self): return 2
@@ -87,16 +92,25 @@ class FakeBroker:
     def ask(self): return self._price + 0.25
     # cuenta
     def account_balance(self): return self._balance
-    def account_equity(self): return self._balance
+    def account_equity(self): return None if self.acct_fail else self._balance
     def margin_free(self): return self._free
-    def account_margin(self): return self._margin
+    def account_margin(self): return None if self.acct_fail else self._margin
     def contract_size(self): return 100.0
     def margin_level(self): return self.ml
-    def stop_out_levels(self): return (100.0, 50.0)
+    def stop_out_levels(self): return None if self.acct_fail else (100.0, 50.0)
+    def account_snapshot(self):
+        if self.acct_fail:
+            return None
+        from types import SimpleNamespace
+        return SimpleNamespace(equity=self.account_equity(), margin=self.account_margin(),
+                               margin_so_so=self.stop_out_levels()[1],
+                               balance=self.account_balance())
     def hedged_margin_rate(self): return (0.0, False)
     # posiciones
-    def positions(self): return list(self._pos)
-    def positions_all(self): return list(self._pos)
+    def positions(self): return [] if self.pos_fail else list(self._pos)
+    def positions_all(self): return [] if self.pos_fail else list(self._pos)
+    def positions_checked(self): return None if self.pos_fail else self.positions()
+    def positions_all_checked(self): return None if self.pos_fail else self.positions_all()
     def positions_of_magic(self, m): return [p for p in self._pos if p.magic == m]
     def order_margin(self, otype, lots): return 0.0 if lots <= 0 else lots * 100 * self._price / 500.0
     def magic_margin(self, m): return sum(self.order_margin(0, p.volume) for p in self.positions_of_magic(m))
@@ -432,9 +446,15 @@ def run():
         # El precio del broker debe ser coherente con las velas servidas, o el
         # gate de pullback (distancia a la EMA) bloquea la entrada.
         broker._price = float(d15["close"].iloc[-1])
-        return M15Engine(broker, logger, d15,
-                         series(n=300, start=3900, drift=0.07, noise=0.4, seed=8),
-                         series(n=300, start=3900, drift=1.5, noise=2.0, seed=9))
+        eng = M15Engine(broker, logger, d15,
+                        series(n=300, start=3900, drift=0.07, noise=0.4, seed=8),
+                        series(n=300, start=3900, drift=1.5, noise=2.0, seed=9))
+        # Ledger propio y limpio por motor: un ciclo nuevo (meta vacia) abre la
+        # OP1 en el primer tick vacio; meta vieja exige 2 lecturas vacias.
+        from bot import ledger as _ledger
+        eng.cycle = _ledger.CycleLedger(
+            _os_ledger.path.join(_tmp_ledger.mkdtemp(), "l.json"), logger)
+        return eng
 
     # La señal de entrada depende de fractales H4/M15; aqui se fuerza para
     # aislar lo que se quiere probar: como se CONSTRUYE la orden de Op1.

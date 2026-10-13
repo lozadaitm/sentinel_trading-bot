@@ -53,6 +53,13 @@ PARAM_SKIP = {"id", "user_id", "bot_id", "updated_at"}
 HELP_HINT = "p=params   Up/Dn PgUp/PgDn=log   Fin=al vivo   q=salir"
 
 
+def fmt_money(v):
+    """Importe con 2 decimales; 'n/a' si MT5 no respondio (None)."""
+    if v is None:
+        return "n/a"
+    return f"{v:.2f}"
+
+
 class LogBuffer:
     """Ring buffer thread-safe para los eventos del Logger."""
 
@@ -162,8 +169,8 @@ def render_hud(hud, is_active=False, user_label=""):
             ("RSI ", "dim"), (f"{hud['rsi']:.1f}", "bold"),
         ),
         Text.assemble(
-            ("Bal ", "dim"), (f"{hud['balance']:.2f}  ", "white"),
-            ("Eq ", "dim"), (f"{hud['equity']:.2f}", "white"),
+            ("Bal ", "dim"), (f"{fmt_money(hud['balance'])}  ", "white"),
+            ("Eq ", "dim"), (fmt_money(hud['equity']), "white"),
         ),
     )
     head.add_row(state, Text(f"servidor {hud['server_time']}", style="dim"))

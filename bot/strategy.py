@@ -147,6 +147,10 @@ class SentinelEngine:
         self._dissolve_err_next = 0   # throttle del ERROR/SHADOW de la disolucion por parejas
         self._dissolve_retry_next = 0 # backoff (60 s) de reintentos de la disolucion
         self._hedge_fail_next = {}    # ticket -> proximo ERROR de "Hedge Lock FALLIDO"
+        self._surv_unknown_next_log = 0  # throttle del aviso "cuenta no evaluable" del candado
+        self._empty_reads = 0         # lecturas vacias CONFIRMADAS seguidas (reset de meta a la 2.a)
+        self._pos_fail_next_log = 0   # throttle del aviso de positions_get fallido
+        self._guard_err_next = {}     # subsistema -> proximo ERROR por excepcion (600 s)
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -427,6 +431,29 @@ class SentinelEngine:
     # ==============================================================
     # CANDADO DE CESTA (rol LOCK, spec §5.3)
     # ==============================================================
+    def _guarded(self, name, fn):
+        """Corre un subsistema del tick aislado: una excepcion se loguea (ERROR,
+        como mucho cada 600 s por subsistema) y el tick sigue (hedge monitor, trail)."""
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            if self.now >= self._guard_err_next.get(name, 0):
+                self._guard_err_next[name] = self.now + LOCK_FAIL_LOG_EVERY_S
+                try:
+                    self.log.write("ERROR", f"Subsistema '{name}' fallo y se omite este tick: "
+                                            f"{type(e).__name__}: {e}",
+                                   balance=self.b.account_balance())
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _backfill_lock_since(self, positions):
+        """Patas LOCK vivas sin lock_since (adopcion tras IOC parcial, ledger
+        perdido/corrupto, instancia movida): se rellena con el time de la pata
+        LOCK mas vieja, para que la disolucion no quede bloqueada para siempre."""
+        legs = self.cycle.lock_legs(positions)
+        if legs and self.cycle.get_meta("lock_since") is None:
+            self.cycle.set_meta("lock_since", float(min(p.time for p in legs)))
+
     def _lock_state(self, positions):
         """LIBRE sin patas LOCK; CONGELADO con LOCK y |neto propio| < step;
         AFLOJADO con LOCK y neto residual."""
@@ -450,6 +477,15 @@ class SentinelEngine:
         if abs(net) < step - 1e-9:
             return
         s = self.surv.s_now()
+        if s is None:
+            # Cuenta no evaluable (account_info/positions_get None): NO es S=0.
+            # Se salta el tick; nunca se pone un candado por una lectura fallida.
+            if self.now >= self._surv_unknown_next_log:
+                self._surv_unknown_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
+                self.log.write("SYSTEM", "Candado: cuenta no evaluable (MT5 sin respuesta); "
+                                         "se reevalua en el proximo tick.",
+                               balance=self.b.account_balance())
+            return
         if s >= float(self._p("lock_trigger_usd")):
             return
         otype = mt5.ORDER_TYPE_SELL if net > 0 else mt5.ORDER_TYPE_BUY
@@ -460,7 +496,7 @@ class SentinelEngine:
             if self.now >= self._lock_fail_next_log:
                 self._lock_fail_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
                 self.log.write("SHADOW", f"Candado (sombra): se pondria {total:.2f} lotes {side}. "
-                                         f"S={s:.0f} $", balance=self.b.account_balance())
+                                         f"S={survival._s_txt(s)} $", balance=self.b.account_balance())
             return
 
         # Por encima de volume_max se parte en varias patas LOCK (se tratan como bloque).
@@ -489,6 +525,9 @@ class SentinelEngine:
             if fill is None:
                 fill = self.b.bid() if otype == mt5.ORDER_TYPE_SELL else self.b.ask()
             self.cycle.set_meta("unlock_ref_price", float(fill))
+            # F4: cada pata confirmada (candado o re-candado) reinicia el plazo
+            # de 24 h de la disolucion.
+            self.cycle.set_meta("lock_ref_ts", self.now)
 
         if locked > 0:
             if self.cycle.get_meta("lock_since") is None:
@@ -497,7 +536,7 @@ class SentinelEngine:
                                 round(float(self.cycle.get_meta("lock_initial_volume", 0.0)) + locked, 8))
             # Un SL que saltara cambiaria el neto congelado: se limpian todos.
             self._clear_lock_sls(self.b.positions())
-            msg = f"Candado puesto: {locked:.2f} lotes {side}. S={s:.0f} $"
+            msg = f"Candado puesto: {locked:.2f} lotes {side}. S={survival._s_txt(s)} $"
             self.log.write("PROTECCION", msg, lots=locked, balance=self.b.account_balance())
             self.alerts.notify("candado", "INFO", "candado de cesta puesto",
                                f"{msg}. La cesta queda congelada (neto 0) hasta un rebote "
@@ -507,7 +546,7 @@ class SentinelEngine:
         if fail_rc is not None and self.now >= self._lock_fail_next_log:
             self._lock_fail_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
             free = self.b.margin_free()
-            msg = f"Candado FALLIDO ({fail_rc}). S={s:.0f} $. Margen libre {free:.2f}"
+            msg = f"Candado FALLIDO ({fail_rc}). S={survival._s_txt(s)} $. Margen libre {free:.2f}"
             self.log.write("ERROR", msg, balance=self.b.account_balance())
             self.alerts.notify("candado_fallido", "CRITICA", "candado de cesta FALLIDO",
                                f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
@@ -556,14 +595,18 @@ class SentinelEngine:
         # 4. Volumen: el mayor v que deja S >= survival_move_usd y el neto propio en cupo.
         # S cae y |neto propio| crece de forma monotona con v: busqueda binaria
         # sobre k (acota las llamadas a MT5 por tick).
-        target = float(self._p("survival_move_usd"))
-        cap = float(self._p("equity_weight")) * self.surv.n_max()
+        # Una sola foto de la cuenta; si MT5 no responde no se afloja (desconocido).
+        snap = self.surv.snapshot()
+        if snap is None:
+            return
+        target = self.surv._target()
+        cap = self.surv._f("equity_weight") * self.surv.n_max(snap)
         own = survival.net_lots(positions)
         vmin = self.b.volume_min()
 
         def fits(k):
             cand = round(k * step, 8)
-            return (self.surv.s_with_delta(dir_orig * cand, 0.0) >= target - 1e-9
+            return (self.surv.s_with_delta(dir_orig * cand, 0.0, snap) >= target - 1e-9
                     and abs(own + dir_orig * cand) <= cap + 1e-9)
 
         lo, hi = 0, int(math.floor(total / step + 1e-9))   # invariante: fits(lo) o lo == 0
@@ -618,13 +661,15 @@ class SentinelEngine:
         self.cycle.set_meta("unlock_ref_price", price)
         self.cycle.set_meta("last_unlock_ts", self.now)
         s = self.surv.s_now()
-        msg = f"Candado aflojado: cerrados {closed:.2f} lotes (rebote +{rebound:.0f} $). S={s:.0f} $"
+        msg = (f"Candado aflojado: cerrados {closed:.2f} lotes (rebote +{rebound:.0f} $). "
+               f"S={survival._s_txt(s)} $")
         self.log.write("PROTECCION", msg, lots=closed, balance=self.b.account_balance())
         self.alerts.notify("candado_aflojado", "INFO", "candado de cesta aflojado",
                            f"{msg}. Rebote confirmado a favor del neto original.")
-        if not self.cycle.lock_legs(self.b.positions()):
+        after = self.b.positions_checked()
+        if after is not None and not self.cycle.lock_legs(after):
             # Ultima pata LOCK cerrada: estado LIBRE (se conserva last_unlock_ts).
-            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume", "lock_ref_ts"):
                 self.cycle.set_meta(key, None)
 
     def _utc_day(self):
@@ -648,8 +693,7 @@ class SentinelEngine:
         aqui SOLO se reintenta cerrar ese resto (backoff 60 s, sin gates de
         hora/dia/24 h; el VCB si bloquea) y nunca se empieza otra pareja.
         """
-        ref_ts = max(float(self.cycle.get_meta("lock_since") or 0),
-                     float(self.cycle.get_meta("last_unlock_ts") or 0))
+        ref_ts = self._dissolve_ref_ts()
         if self.cycle.get_meta("dissolve_pending"):
             self._retry_dissolve_pending(ref_ts)
             return
@@ -779,13 +823,23 @@ class SentinelEngine:
             return
         self._dissolve_done(closed1, tk1, tk2, lock_case, ref_ts)
 
+    def _dissolve_ref_ts(self):
+        """Referencia del plazo de 24 h: el ultimo candado/re-candado (lock_ref_ts),
+        el ultimo aflojado (last_unlock_ts) o el inicio del candado (lock_since)."""
+        return max(float(self.cycle.get_meta("lock_ref_ts") or 0),
+                   float(self.cycle.get_meta("last_unlock_ts") or 0),
+                   float(self.cycle.get_meta("lock_since") or 0))
+
     def _retry_dissolve_pending(self, ref_ts):
         """R14: reintenta cerrar el resto del segundo miembro de una pareja a medias."""
         if self.vol_breaker or self.now < self._dissolve_retry_next:
             return
         pend = self.cycle.get_meta("dissolve_pending")
         ptype = mt5.POSITION_TYPE_BUY if pend["side"] == "BUY" else mt5.POSITION_TYPE_SELL
-        by_t = {p.ticket: p for p in self.b.positions()}
+        cur = self.b.positions_checked()
+        if cur is None:
+            return   # lectura fallida: nunca descartar la deuda por una lista vacia falsa
+        by_t = {p.ticket: p for p in cur}
         alive = [by_t[t] for t in pend["tickets"] if t in by_t and by_t[t].type == ptype]
         if not alive:
             self.cycle.set_meta("dissolve_pending", None)
@@ -795,7 +849,7 @@ class SentinelEngine:
         step = self.b.volume_step()
         lots = float(pend["lots"])
         # Nunca pasarse del neto previo a la pareja (p. ej. si otro candado ya lo cubrio).
-        net = survival.net_lots(self.b.positions())
+        net = survival.net_lots(cur)
         gap = (net - float(pend["net_before"])) if ptype == mt5.POSITION_TYPE_BUY \
             else (float(pend["net_before"]) - net)
         lots = round(min(lots, math.floor(max(gap, 0.0) / step + 1e-9) * step), 8)
@@ -834,13 +888,14 @@ class SentinelEngine:
                        f"Disolucion por parejas: {x:.2f} lotes de {self._tickets_txt(tk1)} + "
                        f"{self._tickets_txt(tk2)}. Neto sin cambio.",
                        lots=x, balance=self.b.account_balance(), ticket=tk1[0] if tk1 else 0)
-        if lock_case and not self.cycle.lock_legs(self.b.positions()):
+        after = self.b.positions_checked() if lock_case else None
+        if after is not None and not self.cycle.lock_legs(after):
             # Ultima pata LOCK disuelta: estado LIBRE. La referencia del plazo
             # (ultimo candado/aflojado) se conserva en last_unlock_ts para el
             # caso "ambos lados".
             if ref_ts > 0:
                 self.cycle.set_meta("last_unlock_ts", ref_ts)
-            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume", "lock_ref_ts"):
                 self.cycle.set_meta(key, None)
 
     @staticmethod
@@ -848,28 +903,57 @@ class SentinelEngine:
         return ", ".join(f"#{t}" for t in tickets)
 
     def _dissolve_close(self, member, lots, step):
-        """Cierra `lots` de las patas de un miembro (en orden). Solo cuenta lo
-        confirmado con retcode DONE. Devuelve (cerrado, realizado, ticket_fallido,
-        tickets_cerrados)."""
+        """Cierra `lots` de las patas de un miembro (en orden). Cuenta lo
+        confirmado con retcode DONE y, en un DONE_PARTIAL, el volumen REALMENTE
+        cerrado (res.volume o, si no viene, releyendo la posicion), para que el
+        segundo miembro / la deuda usen la cifra real. Devuelve (cerrado,
+        realizado, ticket_fallido, tickets_cerrados)."""
         remaining, closed, realized, tickets = round(lots, 8), 0.0, 0.0, []
         for p in member:
             if remaining < step - 1e-9:
                 break
             take = round(min(p.volume, remaining), 8)
-            frac = take / p.volume
-            pl = (p.profit + p.swap) * frac   # antes del cierre (el volumen cambia)
+            vol_before = p.volume
+            pl_per_lot = (p.profit + p.swap) / p.volume if p.volume > 0 else 0.0
             ticket = p.ticket
             if take >= p.volume - 1e-9:
                 res = self.b.close_position(p, "Basket Dissolve")
             else:
                 res = self.b.close_partial(p, take, "Basket Dissolve")
-            if getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+            rc = getattr(res, "retcode", None)
+            if rc == mt5.TRADE_RETCODE_DONE_PARTIAL:
+                got = self._partial_closed_volume(res, ticket, vol_before, take, step)
+                if got >= step - 1e-9:
+                    closed = round(closed + got, 8)
+                    realized += pl_per_lot * got
+                    tickets.append(ticket)
                 return closed, realized, ticket, tickets
+            if rc != mt5.TRADE_RETCODE_DONE:
+                return closed, realized, ticket, tickets
+            pl = pl_per_lot * take   # antes del cierre (el volumen cambia)
             closed = round(closed + take, 8)
             realized += pl
             remaining = round(remaining - take, 8)
             tickets.append(ticket)
         return closed, realized, None, tickets
+
+    def _partial_closed_volume(self, res, ticket, vol_before, take, step):
+        """Lotes realmente cerrados en un DONE_PARTIAL: res.volume si viene; si no,
+        volumen previo - volumen vivo releido (posicion desaparecida => `take`).
+        Si la relectura falla, 0 (el cierre queda sin contar y se reintenta)."""
+        vol = getattr(res, "volume", None)
+        try:
+            vol = float(vol) if vol is not None else 0.0
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol <= 0:
+            cur = self.b.positions_checked()
+            if cur is None:
+                return 0.0
+            live = next((q for q in cur if q.ticket == ticket), None)
+            vol = take if live is None else max(0.0, vol_before - live.volume)
+        vol = min(vol, take)
+        return round(math.floor(vol / step + 1e-9) * step, 8)
 
     def _dissolve_error(self, msg):
         """ERROR de la disolucion, como mucho cada 600 s."""
@@ -896,8 +980,9 @@ class SentinelEngine:
     def _news_note(self, what):
         """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
         ventana de noticia. En modo observacion es el dato que calibra los
-        umbrales antes de activar el enforcement; con enforcement activo solo
-        no deberia ocurrir: el bloqueo no tiene excepciones."""
+        umbrales antes de activar el enforcement. Con enforcement activo no
+        deberia ocurrir nunca (el bloqueo no tiene excepciones): si aparece,
+        se marca como inesperado."""
         if not self.news_active:
             return
         modo = "bloqueo activo (inesperado)" if self.news_block else "observacion"
@@ -1319,9 +1404,11 @@ class SentinelEngine:
             if (dist >= atr_mult or money >= floor) and money > best_money:
                 # Aguante: no cobrar una pata suelta si cerrarla AUMENTA el neto y
                 # la cuenta quedaria por debajo del movimiento de supervivencia.
-                if (self._closing_increases_exposure(p)
-                        and self.surv.s_after_close(p) < float(self._p("survival_move_usd"))):
-                    continue
+                if self._closing_increases_exposure(p):
+                    s_after = self.surv.s_after_close(p)
+                    # Desconocido (MT5 sin respuesta): no se cobra la pata suelta.
+                    if s_after is None or s_after < float(self._p("survival_move_usd")):
+                        continue
                 best_money = money
                 best_single, best_pair = p, None
 
@@ -1582,7 +1669,8 @@ class SentinelEngine:
         # NewsGuard (Fase 1): ¿estamos dentro de la ventana dura de una roja?
         # Igual que spread/VCB, SOLO condiciona aperturas aditivas: la gestion
         # (hedge, cierres, trailing, healer, unwind) nunca se congela. Con
-        # news_enforce=False (default) es pura observacion: loguea y no toca.
+        # news_enforce=True (default) bloquea las aditivas en la ventana; con
+        # news_enforce=False es pura observacion: loguea y no toca.
         self.news_active, self.news_reason = self.news.check(
             self.now, int(self._p("news_pre_seconds")),
             int(self._p("news_post_seconds")), self._p("news_currencies"))
@@ -1612,13 +1700,28 @@ class SentinelEngine:
         # para que Unwind/Healer conozcan los pares vigentes de este tick
         # (adopcion por comment tras un restart, hedges viudos -> ORPHAN,
         # promocion de huerfano solitario a ENTRY).
-        self.cycle.sync(self.b.positions())
+        # Lectura CHEQUEADA: si positions_get fallo (None) el tick se salta entero.
+        # Una lista vacia falsa haria olvidar roles en el ledger, reiniciar la
+        # meta del ciclo (candado, rescue_opened, deuda de disolucion) o abrir
+        # una ENTRY sobre una cesta viva.
+        _pos_tick = self.b.positions_checked()
+        if _pos_tick is None:
+            if self.now >= self._pos_fail_next_log:
+                self._pos_fail_next_log = self.now + LOCK_FAIL_LOG_EVERY_S
+                self.log.write("SYSTEM", "Lectura de posiciones fallida (MT5 sin respuesta): "
+                                         "tick omitido, sin decisiones de trading.",
+                               balance=self.b.account_balance())
+            return
+        self.cycle.sync(_pos_tick)
+        self._backfill_lock_since(_pos_tick)
 
         # Candado de cesta (spec §5.3): se evalua ANTES de los subsistemas y el
         # estado se calcula con las posiciones releidas (puede haberse puesto).
-        self._maybe_lock()
-        self._maybe_unlock()   # §5.4: solo con rebote confirmado (no-op sin patas LOCK)
-        self._maybe_dissolve() # §5.5: una vez al dia, por parejas, sin cambiar el neto
+        # Cada uno aislado: una excepcion (config/meta corrupta) no aborta el
+        # tick antes del hedge monitor y el trailing.
+        self._guarded("candado", self._maybe_lock)
+        self._guarded("aflojado", self._maybe_unlock)    # §5.4: solo con rebote confirmado
+        self._guarded("disolucion", self._maybe_dissolve)  # §5.5: diaria, por parejas, neto intacto
         _pos_now = self.b.positions()
         self.lock_state = self._lock_state(_pos_now)
         frozen = self.lock_state == LOCK_FROZEN
@@ -1633,7 +1736,9 @@ class SentinelEngine:
         # Todas las posiciones del magic son cesta core: el grinder salio del
         # Sentinel a su propio proceso (bot/strategy_m5.py), con su propio magic.
         # Se relee DESPUES de los subsistemas (pueden haber cerrado legs).
-        core_positions = self.b.positions()
+        core_positions = self.b.positions_checked()
+        if core_positions is None:
+            return   # lectura fallida a mitad de tick: nada se decide sobre una lista falsa
         my_positions = core_count = len(core_positions)
 
         # Vistas por ROL. La profundidad de la maquina de estados es la del
@@ -1644,16 +1749,31 @@ class SentinelEngine:
                        if entry is not None else None)
         cycle_legs = self.cycle.cycle_legs(core_positions)
         cycle_count = len(cycle_legs)
-        lock_alive = bool(self.cycle.lock_legs(core_positions))
+        lock_n = len(self.cycle.lock_legs(core_positions))
+        lock_alive = lock_n > 0
+        # Profundidad de la cesta SIN patas LOCK: el candado no es un leg de
+        # rescate (target ">=4 core" y etiqueta "Rescue Mission Success").
+        depth = core_count - lock_n
 
         # Red de seguridad de ciclo (B/C): si NO hay cesta core (cerro por _close_all,
         # stop-out del broker o SL), reinicia el realizado del ciclo y marca rebaseline
         # del Healer. Cubre los finales de ciclo que no pasan por _close_all.
+        # Solo tras DOS lecturas vacias confirmadas seguidas: un vacio espurio no
+        # debe borrar la meta (candado, rescue_opened, deuda). Mientras no se
+        # confirma, el tick termina aqui (sin ENTRY sobre meta vieja); con la meta
+        # ya vacia y sin realizado (arranque limpio) no hay nada que proteger.
         if core_count == 0:
-            self.cycle_realized = 0.0
-            self._healer_needs_rebaseline = True
-            self._cover_protect_logged = False
-            self.cycle.reset_meta()   # ref_lot / rescue_opened / candado: meta del ciclo muerto
+            self._empty_reads += 1
+            if self._empty_reads < 2:
+                if self.cycle.meta or abs(self.cycle_realized) > 1e-9:
+                    return
+            else:
+                self.cycle_realized = 0.0
+                self._healer_needs_rebaseline = True
+                self._cover_protect_logged = False
+                self.cycle.reset_meta()   # ref_lot / rescue_opened / candado: meta del ciclo muerto
+        else:
+            self._empty_reads = 0
 
         current_atr = self._effective_atr()
         point = self.b.point()
@@ -1667,8 +1787,8 @@ class SentinelEngine:
         if my_positions > 0:
             net_pl = self._basket_net_profit()
             arm_target = self._move_money(float(self._p("basket_arm_move_usd")))
-            # Cesta profunda (>=4 core): se arma antes, con el target de rescate.
-            if core_count >= 4 and self._p("use_rescue_mode"):
+            # Cesta profunda (>=4 core sin patas LOCK): se arma antes, con el target de rescate.
+            if depth >= 4 and self._p("use_rescue_mode"):
                 rescue_target = self._move_money(float(self._p("rescue_arm_move_usd")))
                 if rescue_target < arm_target:
                     arm_target = rescue_target
@@ -1702,7 +1822,7 @@ class SentinelEngine:
                         self.cycle_armed = False
                         self.max_cycle_peak = 0.0
                     else:
-                        reason = "Rescue Mission Success" if core_count >= 4 else "Basket Profit Trail"
+                        reason = "Rescue Mission Success" if depth >= 4 else "Basket Profit Trail"
                         self._close_all(reason)
                         return
         else:

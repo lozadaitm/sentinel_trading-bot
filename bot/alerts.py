@@ -42,9 +42,15 @@ class AlertManager:
 
 
 def account_dead(broker):
-    """(True, motivo) si equity <= 0 o el terminal no permite operar."""
+    """(True, motivo) si equity <= 0 o el terminal no permite operar.
+
+    Equity desconocido (None: account_info fallo) NO es cuenta muerta: esa
+    parte no se puede evaluar y no se declara (ni ERROR ni CRITICA por una
+    lectura fallida). El permiso del terminal se sigue comprobando.
+    """
     try:
-        if broker.account_equity() <= 0:
+        equity = broker.account_equity()
+        if equity is not None and equity <= 0:
             return True, "equity <= 0"
         allowed, motivo = broker.trade_allowed()
         if not allowed:

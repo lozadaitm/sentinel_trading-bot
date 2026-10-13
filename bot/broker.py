@@ -88,17 +88,27 @@ class Broker:
         return info.balance if info else 0.0
 
     def account_equity(self):
+        """Equity de la cuenta. None si MT5 no responde (desconocido, NO 0.0:
+        un 0.0 se leeria como cuenta muerta o S=0 y dispararia el candado)."""
         info = mt5.account_info()
-        return info.equity if info else 0.0
+        return info.equity if info else None
 
     def margin_free(self):
         info = mt5.account_info()
         return info.margin_free if info else 0.0
 
     def account_margin(self):
-        """Margen usado por la cuenta (todas las posiciones). 0.0 si MT5 no responde."""
+        """Margen usado por la cuenta (todas las posiciones). None si MT5 no responde."""
         info = mt5.account_info()
-        return info.margin if info else 0.0
+        return info.margin if info else None
+
+    def account_snapshot(self):
+        """UNA lectura de account_info() (equity, margin, margin_so_so, balance...).
+
+        None si MT5 no responde. SurvivalGuard evalua S con una sola foto para
+        que equity, margen y stop-out sean coherentes entre si.
+        """
+        return mt5.account_info()
 
     def contract_size(self):
         """Tamaño del contrato (onzas por lote). 100.0 si MT5 no responde."""
@@ -122,6 +132,25 @@ class Broker:
         pos = mt5.positions_get(symbol=self.symbol)
         return list(pos) if pos else []
 
+    def positions_all_checked(self):
+        """Como positions_all pero None si positions_get FALLO (MT5 devolvio None).
+
+        positions_all mapea el fallo a [] (compatibilidad); aqui se distingue de
+        una cesta realmente vacia (tupla vacia => []). Las decisiones que borran
+        estado o calculan riesgo deben usar esta lectura.
+        """
+        pos = mt5.positions_get(symbol=self.symbol)
+        if pos is None:
+            return None
+        return list(pos)
+
+    def positions_checked(self):
+        """Posiciones de nuestro magic; None si la lectura de MT5 fallo."""
+        pos = self.positions_all_checked()
+        if pos is None:
+            return None
+        return [p for p in pos if p.magic == self.magic]
+
     def positions_of_magic(self, magic):
         """Posiciones del simbolo pertenecientes a un magic concreto."""
         return [p for p in self.positions_all() if p.magic == magic]
@@ -139,14 +168,14 @@ class Broker:
         return info.margin_level
 
     def stop_out_levels(self):
-        """(margin_call, stop_out) declarados por el broker, en %.
+        """(margin_call, stop_out) declarados por el broker, en %. None si MT5 no responde.
 
         Sirven para calibrar la escalera de degradacion contra los umbrales
         reales de la cuenta en vez de contra numeros inventados.
         """
         info = mt5.account_info()
         if info is None:
-            return (0.0, 0.0)
+            return None   # desconocido: no inventar un stop-out de 0 %
         return (info.margin_so_call, info.margin_so_so)
 
     def hedged_margin_rate(self):
