@@ -1,11 +1,11 @@
 # Prompt de arranque — experimento-2-rediseno (2026-10-13)
 
 Copiar y pegar en una sesión nueva de Claude Code abierta en
-`C:\Users\Administrator\Documents\sentinel_trading_exp2`.
+`C:\Users\Administrator\Documents\sentinel_trading` (la carpeta de siempre).
 
 ---
 
-Estamos en la rama `experimento-2-rediseno`, en el worktree `sentinel_trading_exp2`. La carpeta hermana `sentinel_trading` es PRODUCCIÓN (rama `experimento-1-grinder`, 3 bots M15 + 2 M5 corriendo en Lite, tarea `SentinelRestart` apunta allí): no la edites, no cambies su rama, no reinicies bots. Cualquier lectura de MT5 se hace en modo solo lectura contra los terminales ya abiertos, como hace `scripts/news_exporter.py`.
+Estamos en la rama `experimento-2-rediseno`, en la carpeta de siempre. En esta misma carpeta corren 3 bots M15 + 2 M5 en modo Lite sobre cuentas DEMO, con el código de `experimento-1-grinder` cargado en memoria; la tarea `SentinelRestart` apunta aquí. Hasta que yo apruebe un cambio de código, no reinicies bots ni lances `restart_all`. Cualquier lectura de MT5 se hace en modo solo lectura contra los terminales ya abiertos, como hace `scripts/news_exporter.py`. `experimento-1-grinder` (tag `prod-v20-2026-10-13`) es la versión conocida a la que volvemos si algo sale mal.
 
 Antes de nada lee `docs/memory/MEMORY.md` y en detalle `docs/memory/pendientes-pre-experimento-2.md` y `docs/memory/ideas-experimento-2.md`. Ahí está todo el contexto y el backlog de ideas. Ninguna idea está verificada; el objetivo de esta sesión es medir, analizar y decidir, no implementar.
 
@@ -40,4 +40,4 @@ Con el esqueleto del carrusel que está en `ideas-experimento-2` (escáner → s
 - No tocar código del bot hasta que yo apruebe un diseño por escrito. Los hallazgos van a `docs/experimento-2/` y las decisiones firmes a `docs/memory/` siguiendo la convención del CLAUDE.md (archivo + pointer en MEMORY.md + commit).
 - No correr backtests salvo que lo pida.
 - Commitea y pushea cada entregable en esta rama en cuanto esté listo.
-- Si entra un hotfix en `experimento-1-grinder`, mergéalo aquí el mismo día.
+- Ciclo de pruebas cuando apruebe un cambio: implementar → commit → push → `restart_all` → dejar correr días → revisar historial y Supabase → decidir. Si sale mal: checkout de `experimento-1-grinder` + `restart_all`.

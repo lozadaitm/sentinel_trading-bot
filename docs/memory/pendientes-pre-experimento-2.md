@@ -1,15 +1,17 @@
 ---
 name: pendientes-pre-experimento-2
-description: Pendientes abiertos en experimento-1-grinder al congelarla como producción (2026-10-13) antes de abrir experimento-2-rediseno; se reevalúan dentro del brainstorming, no se implementan a ciegas
+description: Pendientes abiertos en experimento-1-grinder al congelarla como versión conocida (2026-10-13) antes de abrir experimento-2-rediseno en la misma carpeta; se reevalúan dentro del brainstorming, no se implementan a ciegas
 metadata:
   type: project
 ---
 
-El 2026-10-13 se congeló `experimento-1-grinder` como rama de producción (`main` se
+El 2026-10-13 se congeló `experimento-1-grinder` como versión conocida (`main` se
 actualizó por fast-forward a ella, tag `prod-v20-2026-10-13`) y se abrió
-`experimento-2-rediseno` en un worktree aparte (`sentinel_trading_exp2`). Esta carpeta
-(`sentinel_trading`) es la que corre en el VPS: 3 bots M15 + 2 M5 en modo Lite y la
-tarea `SentinelRestart` apunta aquí. **Nunca cambiar de rama en esta carpeta.**
+`experimento-2-rediseno` **en la misma carpeta** `sentinel_trading`, la que corre en el
+VPS: 3 bots M15 + 2 M5 en modo Lite sobre cuentas DEMO; la tarea `SentinelRestart`
+apunta aquí. Se descartó un worktree aparte: al ser demo, el ciclo es
+implementar → commit → push → `restart_all` → observar días → decidir. Volver atrás =
+checkout de `experimento-1-grinder` + `restart_all`.
 
 **Pendientes heredados (decidir en el brainstorming de experimento-2):**
 
@@ -33,5 +35,6 @@ tarea `SentinelRestart` apunta aquí. **Nunca cambiar de rama en esta carpeta.**
    Requiere exportar el historial MT5 de cada instancia y compararlo. Ver
    [[ideas-experimento-2]].
 
-**Cómo aplicar:** cualquier hotfix que entre en `experimento-1-grinder` se mergea a
-`experimento-2-rediseno` el mismo día ([[workflow-implement-then-commit]]).
+**Cómo aplicar:** `experimento-1-grinder` no se desarrolla más; es la red de seguridad.
+Cuando una versión de experimento-2 lleve semanas estable, `main` se actualiza a ella
+por fast-forward con un tag nuevo ([[workflow-implement-then-commit]]).
