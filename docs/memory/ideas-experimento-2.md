@@ -60,6 +60,18 @@ Lo aprovechable: la separación escáner → señal → plan → riesgo → memo
 auditable con aprobación humana. Lo que no aplica: stops duros y R:B fijo chocan con
 el diseño de ciclos/hedge del bot.
 
+**Estado al 2026-10-13 (sesión de brainstorming):**
+- A → hecho: `docs/experimento-2/audit/informe-3-cuentas.md`. 2 cuentas quemadas por patas
+  de recovery/rescate sin cobertura, churn OP4↔Unwind y umbrales en $ fijos que desincronizan
+  cuentas de distinto tamaño. Vantage eliminó 25912766 y 25556247.
+- B Kronos → investigar más (solo un test offline; evidencia débil en oro y bug de cuelgue en Windows).
+- C Alpha decay → se diseña junto a los arreglos (los bots estuvieron 50 días "RUNNING" sobre cuentas quemadas).
+- D Sesiones → descartada la parametrización tipo video; útil el perfil horario (01 UTC y 13–15 UTC más violentas).
+  `docs/experimento-2/analisis/informe-sesiones-amd.md`.
+- E APILayer → descartada. F MiroFish → descartada como señal.
+- G AMD → descartada como reversión (MFE/MAE < 1); "continuación" sin significancia, prioridad baja.
+- H Arnés de agentes → pospuesto hasta estabilizar el bot.
+
 **Cómo aplicar:** en experimento-2, invocar `brainstorming` (plugin Superpowers) con
 este backlog como insumo; cada idea termina en "descartada", "investigar más" o
 "diseño aprobado" antes de tocar código. Ver [[pendientes-pre-experimento-2]].
