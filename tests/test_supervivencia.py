@@ -642,6 +642,124 @@ def test_lock_vmax_zero():
           f"volume_max 0 => una sola pata de 0.34 (got {b.orders})")
 
 
+# ----------------------------------------------------------------------
+# Aflojar el candado por rebote confirmado (spec §5.4)
+# ----------------------------------------------------------------------
+def _unlock_setup(price, equity=5000.0):
+    """E=5000, LOCK SELL 0.34 a 4400 y ENTRY BUY 0.34 (cesta congelada)."""
+    e, b, log = _lock_eng(equity=equity)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4400.0, "SMC Buy Entry")
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.34, 4400.0, "Basket Lock")
+    e.cycle.sync(b.positions())
+    e.cycle.set_meta("lock_since", e.now - 3600)
+    e.cycle.set_meta("lock_initial_volume", 0.34)
+    b._price = price
+    return e, b, log
+
+
+def _lock_vol(e, b):
+    return round(sum(p.volume for p in e.cycle.lock_legs(b.positions())), 8)
+
+
+def test_no_unlock_on_continuation():
+    """Anti-objetivo: la pata LOCK en verde (precio siguio cayendo) NO es motivo para aflojar."""
+    from bot import strategy
+    e, b, log = _unlock_setup(4340.0)
+    e._maybe_unlock()
+    check(not b.partials and _lock_vol(e, b) == 0.34,
+          f"precio 4340 (LOCK gana 60): nada se cierra (got {b.partials})")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FROZEN, "sigue CONGELADO")
+
+
+def test_unlock_on_rebound():
+    from bot import strategy
+    e, b, log = _unlock_setup(4451.0)
+    sent = _rec_alerts(e, log)
+    check(e._risk_hour() is False, "06:00 servidor (03 UTC) no es hora de riesgo")
+    e._maybe_unlock()
+    check(len(b.partials) == 1 and abs(b.partials[0]["lots"] - 0.14) < 1e-9,
+          f"rebote +51 => se cierran 0.14 (got {b.partials})")
+    check(abs(_lock_vol(e, b) - 0.20) < 1e-9, "quedan 0.20 de LOCK")
+    check(e._lock_state(b.positions()) == strategy.LOCK_LOOSE, "estado AFLOJADO")
+    check(e.cycle.get_meta("unlock_ref_price") == 4451.0, "unlock_ref_price = 4451")
+    check(e.cycle.get_meta("last_unlock_ts") == e.now, "last_unlock_ts = now")
+    check(any(t == "PROTECCION" and "Candado aflojado: cerrados 0.14 lotes (rebote +51 $). S=357 $" in m
+              for t, m in log.events), f"log PROTECCION del aflojado (got {log.events})")
+    check(len(sent) == 1, f"una alerta candado_aflojado (got {sent})")
+    check(e.cycle.get_meta("lock_since") is not None, "con LOCK vivo lock_since se conserva")
+
+
+def test_unlock_gates():
+    for name in ("news", "risk_hour", "vcb", "spread"):
+        e, b, log = _unlock_setup(4451.0)
+        if name == "news":
+            e.news_active = True
+        elif name == "risk_hour":
+            e.now = ts(2026, 8, 19, 16)   # 16:00 servidor = 13 UTC
+        elif name == "vcb":
+            e.vol_breaker = True
+        else:
+            e.spread_high = True
+        e._maybe_unlock()
+        check(not b.partials and _lock_vol(e, b) == 0.34,
+              f"gate {name}: el mismo rebote no afloja (got {b.partials})")
+
+
+def test_successive_unlock_needs_new_rebound():
+    from bot import strategy
+    e, b, log = _unlock_setup(4451.0)
+    e._maybe_unlock()
+    check(abs(_lock_vol(e, b) - 0.20) < 1e-9, "primer aflojado: quedan 0.20")
+    b._equity = 10000.0   # el rebote subio el equity: S admite mas neto
+    b._price = 4480.0
+    e._maybe_unlock()
+    check(len(b.partials) == 1, "4480: rebote +29 desde el aflojado anterior => nada")
+    b._price = 4501.0
+    e._maybe_unlock()
+    check(len(b.partials) == 2 and abs(b.partials[1]["lots"] - 0.14) < 1e-9,
+          f"4501: nuevo rebote +50 => se cierran otras 0.14 (got {b.partials})")
+    check(abs(_lock_vol(e, b) - 0.06) < 1e-9, "quedan 0.06 de LOCK")
+    check(e.cycle.get_meta("unlock_ref_price") == 4501.0, "referencia movida a 4501")
+    # ultima pata: con equity holgado se cierra entera y el estado vuelve a LIBRE
+    b._equity = 50000.0
+    b._price = 4551.0
+    e._maybe_unlock()
+    check(not e.cycle.lock_legs(b.positions()), "sin patas LOCK")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FREE, "estado LIBRE")
+    for k in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+        check(e.cycle.get_meta(k) is None, f"{k} a None")
+    check(e.cycle.get_meta("last_unlock_ts") == e.now, "last_unlock_ts se conserva")
+
+
+def test_unlock_newest_first():
+    """Varias patas LOCK: se cierra primero la mas nueva; la ultima necesaria en parcial."""
+    e, b, log = _lock_eng(equity=7000.0)   # cabe 7000/35000 = 0.20
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4400.0, "SMC Buy Entry")
+    old = _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.20, 4400.0, "Basket Lock", t=1_700_000_000)
+    new = _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Basket Lock", t=1_700_000_500)
+    e.cycle.sync(b.positions())
+    b._price = 4451.0
+    e._maybe_unlock()
+    check(new not in b._pos, "la pata mas nueva (0.10) se cierra entera")
+    check(abs(old.volume - 0.10) < 1e-9 and b.partials[-1]["ticket"] == old.ticket,
+          f"la vieja se cierra en parcial 0.10 (queda {old.volume})")
+
+
+def test_unlock_wired_in_tick():
+    from bot import strategy
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=5000.0)
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4400.0, "SMC Buy Entry")
+        _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.34, 4400.0, "Basket Lock")
+        b._price = 4451.0
+        e.on_tick()
+        check(abs(_lock_vol(e, b) - 0.20) < 1e-9, f"on_tick afloja 0.14 (LOCK {_lock_vol(e, b)})")
+        check(e.lock_state == strategy.LOCK_LOOSE, "el tick ve el estado AFLOJADO")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -672,6 +790,12 @@ def main():
     test_healer_gate_excludes_lock()
     test_hedge_fail_throttled()
     test_lock_vmax_zero()
+    test_no_unlock_on_continuation()
+    test_unlock_on_rebound()
+    test_unlock_gates()
+    test_successive_unlock_needs_new_rebound()
+    test_unlock_newest_first()
+    test_unlock_wired_in_tick()
     print("\ntest_supervivencia: TODO OK")
 
 

@@ -141,6 +141,7 @@ class SentinelEngine:
         self.lock_state = LOCK_FREE   # estado del candado de cesta en el tick (spec §5.3)
         self._lock_fail_next_log = 0  # throttle del ERROR de candado fallido
         self._lock_sl_err_next = 0    # throttle del ERROR de SL no limpiado con candado
+        self._unlock_err_next = 0     # throttle del ERROR/SHADOW del aflojado del candado
         self._hedge_fail_next = {}    # ticket -> proximo ERROR de "Hedge Lock FALLIDO"
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
@@ -500,6 +501,114 @@ class SentinelEngine:
             self.alerts.notify("candado_fallido", "CRITICA", "candado de cesta FALLIDO",
                                f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
                                f"({total:.2f} lotes netos).")
+
+    def _maybe_unlock(self):
+        """Afloja el candado SOLO con rebote confirmado a favor del neto original
+        (spec §5.4). Corre en CONGELADO y AFLOJADO, justo despues de _maybe_lock.
+
+        Principio: con candado puesto el equity es el mismo se cierre la pata que
+        se cierre; el "verde/rojo" de la pata LOCK es contabilidad, nunca motivo
+        para aflojar. Esperar a la pata LOCK en verde seria aflojar cuando el
+        precio SIGUIO en contra (promediar contra la tendencia): prohibido. Solo
+        se vuelve a exponer tras un rebote >= unlock_rebound_usd medido desde el
+        precio medio del candado o desde el aflojado anterior, y solo lo que deje
+        S >= survival_move_usd.
+        """
+        positions = self.b.positions()
+        legs = self.cycle.lock_legs(positions)
+        if not legs:
+            return
+        lock_net = survival.net_lots(legs)
+        step = self.b.volume_step()
+        if abs(lock_net) < step - 1e-9:
+            return
+        # Patas SELL => el neto original era largo (dir +1); BUY => corto (dir -1).
+        dir_orig = 1.0 if lock_net < 0 else -1.0
+        lock_type = mt5.POSITION_TYPE_SELL if dir_orig > 0 else mt5.POSITION_TYPE_BUY
+        legs = [p for p in legs if p.type == lock_type]
+        total = round(sum(p.volume for p in legs), 8)
+
+        # 1. Referencia: precio del aflojado anterior o medio ponderado del candado.
+        ref = self.cycle.get_meta("unlock_ref_price")
+        if ref is None:
+            ref = sum(p.price_open * p.volume for p in legs) / total
+        ref = float(ref)
+        # 2. Rebote a favor del neto original (nunca la continuacion).
+        price = self.b.bid() if dir_orig > 0 else self.b.ask()
+        rebound = (price - ref) if dir_orig > 0 else (ref - price)
+        # 3. Gates: todos.
+        if rebound < float(self._p("unlock_rebound_usd")) - 1e-9:
+            return
+        if self.vol_breaker or self.spread_high or self.news_active or self._risk_hour():
+            return
+
+        # 4. Volumen: el mayor v que deja S >= survival_move_usd y el neto propio en cupo.
+        import math
+        target = float(self._p("survival_move_usd"))
+        cap = float(self._p("equity_weight")) * self.surv.n_max()
+        own = survival.net_lots(positions)
+        vmin = self.b.volume_min()
+        v = 0.0
+        k = int(math.floor(total / step + 1e-9))
+        while k > 0:
+            cand = round(k * step, 8)
+            if (self.surv.s_with_delta(dir_orig * cand, 0.0) >= target - 1e-9
+                    and abs(own + dir_orig * cand) <= cap + 1e-9):
+                v = cand
+                break
+            k -= 1
+        if v < vmin - 1e-9:
+            return
+
+        if self.b.shadow:
+            if self.now >= self._unlock_err_next:
+                self._unlock_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
+                self.log.write("SHADOW", f"Candado (sombra): se aflojarian {v:.2f} lotes "
+                                         f"(rebote +{rebound:.0f} $).",
+                               balance=self.b.account_balance())
+            return
+
+        # 5. Cierre: de la pata LOCK mas nueva a la mas vieja; parcial en la ultima.
+        legs.sort(key=lambda p: (p.time, p.ticket), reverse=True)
+        remaining, closed, realized = v, 0.0, 0.0
+        for p in legs:
+            if remaining < step - 1e-9:
+                break
+            lots = round(min(p.volume, remaining), 8)
+            frac = lots / p.volume
+            leg_pl = (p.profit + p.swap) * frac   # antes del cierre (el volumen cambia)
+            if lots >= p.volume - 1e-9:
+                res = self.b.close_position(p, "Basket Unlock")
+            else:
+                res = self.b.close_partial(p, lots, "Basket Unlock")
+            if getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+                if self.now >= self._unlock_err_next:
+                    self._unlock_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
+                    self.log.write("ERROR",
+                                   f"Aflojado del candado RECHAZADO en ticket #{p.ticket} "
+                                   f"(retcode {getattr(res, 'retcode', 'sin respuesta del broker')}). "
+                                   f"Se reevalua en el proximo tick.",
+                                   balance=self.b.account_balance(), ticket=p.ticket)
+                break
+            closed = round(closed + lots, 8)
+            realized += leg_pl
+            remaining = round(remaining - lots, 8)
+        if closed <= 0:
+            return
+
+        self.cycle_realized += realized
+        # 6. Referencia para el siguiente aflojado: este precio.
+        self.cycle.set_meta("unlock_ref_price", price)
+        self.cycle.set_meta("last_unlock_ts", self.now)
+        s = self.surv.s_now()
+        msg = f"Candado aflojado: cerrados {closed:.2f} lotes (rebote +{rebound:.0f} $). S={s:.0f} $"
+        self.log.write("PROTECCION", msg, lots=closed, balance=self.b.account_balance())
+        self.alerts.notify("candado_aflojado", "INFO", "candado de cesta aflojado",
+                           f"{msg}. Rebote confirmado a favor del neto original.")
+        if not self.cycle.lock_legs(self.b.positions()):
+            # Ultima pata LOCK cerrada: estado LIBRE (se conserva last_unlock_ts).
+            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+                self.cycle.set_meta(key, None)
 
     def _clear_lock_sls(self, positions):
         """Con candado vivo ningun leg propio puede llevar SL (un SL que salte
@@ -1241,6 +1350,7 @@ class SentinelEngine:
         # Candado de cesta (spec §5.3): se evalua ANTES de los subsistemas y el
         # estado se calcula con las posiciones releidas (puede haberse puesto).
         self._maybe_lock()
+        self._maybe_unlock()   # §5.4: solo con rebote confirmado (no-op sin patas LOCK)
         _pos_now = self.b.positions()
         self.lock_state = self._lock_state(_pos_now)
         frozen = self.lock_state == LOCK_FROZEN
