@@ -19,3 +19,4 @@
 - [Exportador de noticias en Python](news-exporter-python.md) — scripts/news_exporter.py alimenta el JSON del NewsGuard desde Forex Factory en tiempo de servidor (offset via MT5); reemplaza el EA MQL5 headless; lo lanza start_all, lo mata restart_all
 - [Pendientes pre-experimento-2](pendientes-pre-experimento-2.md) — exp-1-grinder congelada como versión conocida (13-oct-2026, tag prod-v20-2026-10-13); exp-2 corre en la misma carpeta sobre cuentas demo, ciclo implementar→restart_all→observar; 7 pendientes heredados
 - [Ideas experimento-2](ideas-experimento-2.md) — backlog sin verificar: auditoría 3 cuentas, Kronos, alpha decay (racha OP4 + Sharpe), sesiones, APILayer, MiroFish, AMD, carrusel arnés de agentes
+- [Candado de supervivencia](survival-cap-basket-lock.md) — tope 350 $ de aguante, candado de cesta a 150 $, desbloqueo solo con rebote >= 50 $, disolución por parejas tras 24 h, umbrales en movimiento de precio, news_enforce; migración 010

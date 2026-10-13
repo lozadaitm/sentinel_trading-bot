@@ -103,6 +103,25 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     log_file_name           TEXT             DEFAULT 'Gold_HyperGrinder_v20',
     cooldown_seconds        INTEGER          DEFAULT 10,
 
+    -- 11. Supervivencia + candado de cesta (migracion 010)
+    survival_move_usd       DOUBLE PRECISION DEFAULT 350.0,
+    lock_trigger_usd        DOUBLE PRECISION DEFAULT 150.0,
+    unlock_rebound_usd      DOUBLE PRECISION DEFAULT 50.0,
+    risk_hours_utc          TEXT             DEFAULT '1,13,14,15',
+    lock_dissolve_after_h   DOUBLE PRECISION DEFAULT 24,
+    lock_dissolve_fraction  DOUBLE PRECISION DEFAULT 0.34,
+    lock_dissolve_hours_utc TEXT             DEFAULT '3,4',
+    basket_arm_move_usd     DOUBLE PRECISION DEFAULT 0.83,
+    rescue_arm_move_usd     DOUBLE PRECISION DEFAULT 0.56,
+    min_green_move_usd      DOUBLE PRECISION DEFAULT 0.33,
+    retrace_min_move_usd    DOUBLE PRECISION DEFAULT 0.11,
+    retrace_max_move_usd    DOUBLE PRECISION DEFAULT 5.6,
+    fixed_retrace_move_usd  DOUBLE PRECISION DEFAULT 0.22,
+    unwind_floor_move_usd   DOUBLE PRECISION DEFAULT 3.33,
+    rescue_l2_move_usd      DOUBLE PRECISION DEFAULT 16.7,
+    rescue_l3_move_usd      DOUBLE PRECISION DEFAULT 44.4,
+    news_enforce            BOOLEAN          DEFAULT true,
+
     UNIQUE (user_id, symbol)
 );
 

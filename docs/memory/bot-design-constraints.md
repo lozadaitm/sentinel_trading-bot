@@ -21,3 +21,5 @@ Restricciones que el usuario fijó para el bot (`bot/`), a respetar en cambios f
 **How to apply:** cualquier mecanismo que cierre posiciones individuales debe verificar que no desarma una cobertura de un perdedor abierto. Auditorías de fidelidad: comparar contra `original_MQL5.txt` y reportar inconsistencias antes de aplicar; el usuario distingue "port infiel" de "rediseño deliberado".
 
 Usuario opera el bot en MetaTrader 5 real (XAUUSD+, magic 100100), config vive en tabla PostgreSQL `bot_config`. Lee comments de MT5 para identificar tipos de operación.
+
+- **Candado de cesta (supervivencia)** = otra orden protectora que congela, nunca un stop ni un cierre por drawdown. Ver [[survival-cap-basket-lock]].
