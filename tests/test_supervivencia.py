@@ -114,12 +114,75 @@ def test_utc_hour():
     check(survival.utc_hour_from_server(ts(2026, 11, 2, 4)) == 2, "dia tras fin DST (1 nov) => 2")
 
 
+def _eng(equity=7000.0, weight=1.0, cfg=None):
+    """SentinelEngine con ledger temporal y cfg controlada."""
+    import os, tempfile
+    from bot import ledger
+    from bot.strategy import SentinelEngine
+    b = SurvBroker(equity=equity, magic=M15)
+    b._mpl = 1e-9   # margen casi nulo pero > 0 (el gobierno exige req > 0)
+    log = FakeLogger()
+    e = SentinelEngine(b, log)
+    e.cycle = ledger.CycleLedger(os.path.join(tempfile.mkdtemp(), "l.json"), log)
+    e.cfg = {"equity_weight": weight} if cfg is None else cfg
+    return e, b, log
+
+
+def test_open_additive_resizes():
+    from bot import ledger
+    e, b, log = _eng()
+    add(b, BUY, 0.05)
+    ok = e._open_additive(BUY, 0.20, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    check(ok and len(b.orders) == 1 and abs(b.orders[0]["lots"] - 0.15) < 1e-9,
+          f"recovery 0.20 con neto 0.05 => orden de 0.15 (got {b.orders})")
+    e, b, log = _eng()
+    add(b, BUY, 0.196)
+    ok = e._open_additive(BUY, 0.20, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    check(not ok and not b.orders, "neto 0.196 => no envia nada")
+    check(any(t == "BUDGET" and "bloqueada" in m for t, m in log.events), "loguea BUDGET bloqueada")
+
+
+def test_entry_sets_ref_lot_and_rescue_counter():
+    from bot import ledger
+    e, b, log = _eng()
+    ok = e._open_additive(BUY, 0.09, "SMC Buy Entry", ledger.ROLE_ENTRY, "OP1 BUY")
+    check(ok and e.cycle.get_meta("ref_lot") == 0.09, "ENTRY 0.09 => ref_lot 0.09")
+    e._open_additive(BUY, 0.01, "Sentinel Op 4 (L1)", ledger.ROLE_RESCUE, "Rescue")
+    e._open_additive(BUY, 0.01, "Sentinel Op 4 (L1)", ledger.ROLE_RESCUE, "Rescue")
+    check(e.cycle.get_meta("rescue_opened") == 2, "dos RESCUE => rescue_opened == 2")
+
+
+def test_no_fixed_lot_caps():
+    e, b, log = _eng(equity=500000.0, cfg={})
+    check(e._calculate_lots(False) > 1.0, "M15 sin tope fijo de entry (>1.0)")
+    check(e._calculate_lots(True) > 2.0, "M15 sin tope fijo de recovery")
+    from bot.strategy_m5 import M5Engine
+    b5 = SurvBroker(equity=500000.0, magic=M5)
+    m5 = M5Engine(b5, FakeLogger())
+    m5.cfg = {}
+    check(m5._calculate_lots() > 0.50, "M5 sin tope m5_max_lot_cap (>0.50)")
+
+
+def test_min_lot_account_blocks_once():
+    from bot import ledger
+    e, b, log = _eng(equity=1000.0)
+    add(b, BUY, 0.02)
+    for _ in range(3):
+        e._open_additive(BUY, 0.05, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    n = sum(1 for t, _ in log.events if t == "BUDGET")
+    check(not b.orders and n == 1, f"cuenta chica: 0 ordenes y 1 evento BUDGET (got {len(b.orders)}, {n})")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
     test_fit_share_between_bots()
     test_s_after_close()
     test_utc_hour()
+    test_open_additive_resizes()
+    test_entry_sets_ref_lot_and_rescue_counter()
+    test_no_fixed_lot_caps()
+    test_min_lot_account_blocks_once()
     print("\ntest_supervivencia: TODO OK")
 
 

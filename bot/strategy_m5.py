@@ -58,13 +58,13 @@ import math
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators, news
+from . import budget, config, indicators, news, survival
 
 # Defaults = valores input del MQL5 original (fallback si falta en bot_config).
 DEFAULTS = {
     # Gestion
     "m5_lots_per_1000": 0.02,
-    "m5_max_lot_cap": 0.50,
+    "m5_max_lot_cap": 0.0,   # 0 = sin tope fijo (manda el de supervivencia)
     "m5_min_margin_level": 150.0,
     # Gran Hermano (M15)
     "m5_use_bigbro": True,
@@ -138,6 +138,11 @@ class M5Engine:
         self.log = logger
         self.cfg = {}
         self.hud = {}
+
+        # Tope de supervivencia de la cuenta (bot/survival.py); el cfg_provider
+        # mezcla los DEFAULTS del motor con la config vigente (esta gana).
+        self.surv = survival.SurvivalGuard(
+            broker, lambda: {**DEFAULTS, **(self.cfg or {})}, logger, config.MAGIC_NUMBER)
 
         # Rol JUNIOR: reserva margen para las protectoras del M15 y se retira
         # primero cuando la cuenta aprieta.
@@ -213,7 +218,7 @@ class M5Engine:
         if lots > vol_max:
             lots = vol_max
         cap = float(self._p("m5_max_lot_cap"))
-        if lots > cap:
+        if cap > 0 and lots > cap:
             lots = cap
         return lots
 
@@ -770,6 +775,9 @@ class M5Engine:
         # --- EJECUCION con SL dinamico por ATR ---
         lots = self._calculate_lots()
         order_type = mt5.ORDER_TYPE_BUY if signal_buy else mt5.ORDER_TYPE_SELL
+        lots = self.surv.fit(order_type, lots, "Scalp M5")
+        if lots <= 0:
+            return
         if not self.gov.can_open(lots, order_type, budget.KIND_ADDITIVE):
             return
 

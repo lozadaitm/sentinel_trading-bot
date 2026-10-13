@@ -24,12 +24,12 @@ import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators, ledger, news
+from . import budget, config, indicators, ledger, news, survival
 
 # Defaults = valores input del MQL5 (fallback si falta la columna en bot_config)
 DEFAULTS = {
     "inp_max_spread": 350,
-    "base_risk": 5000.0, "base_lots": 0.12, "max_entry_lots": 1.0, "max_recovery_lots": 2.0,
+    "base_risk": 5000.0, "base_lots": 0.12, "max_entry_lots": 0.0, "max_recovery_lots": 0.0,  # 0 = sin tope fijo (manda el de supervivencia)
     "use_basket_close": True, "basket_percent": 0.15, "commission_per_lot": 6.0,
     "use_dynamic_retrace": True, "retrace_atr_mult": 0.1, "fixed_retrace": 2.0,
     "use_dynamic_hedge": True, "hedge_dist": 350, "hedge_atr_mult": 2.0,
@@ -52,7 +52,7 @@ DEFAULTS = {
     # --- Fork A: respiro/supervivencia ante volatilidad anomala (noticia/manipulacion) ---
     "use_vol_breaker": True,          # VCB: circuit breaker de volatilidad (bloquea aperturas, no la gestion)
     "vcb_atr_mult": 2.8,              # VCB: dispara si el rango de la vela M15 en curso >= ATR * este mult
-    "max_net_lots": 1.0,              # tope DURO de exposicion neta core (long-short); 0 = desactivado
+    "max_net_lots": 0.0,              # OBSOLETO (rollback): ya nadie lo lee; manda el tope de supervivencia
     "max_rescue_legs": 3,             # cap de legs de Op4 por ciclo (acota el martingala)
     "use_recovery_h4_gate": True,     # no promediar (recovery/rescue) contra la estructura H4 confirmada
     # --- NewsGuard Fase 1 (bloqueo duro por noticias rojas; ver bot/news.py) ---
@@ -66,6 +66,10 @@ DEFAULTS = {
     "ml_no_add": 200.0,               # bajo este margin level no se abren aditivas (el hedge sigue)
     "ml_flatten": 0.0,                # el senior nunca se auto-liquida: lo hace el M5
 }
+# Tope de supervivencia y umbrales en movimiento (bot/survival.py): solo se
+# anaden las claves que este motor no define (equity_weight mantiene su 0.80).
+for _k, _v in survival.DEFAULTS.items():
+    DEFAULTS.setdefault(_k, _v)
 
 def _struct_txt(v):
     return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
@@ -88,6 +92,11 @@ class SentinelEngine:
         self.gov = budget.MarginGovernor(
             broker, lambda: self.cfg, budget.ROLE_SENIOR,
             peer_magics=config.PEER_MAGICS, logger=logger)
+
+        # Tope de supervivencia de la cuenta (bot/survival.py). El cfg_provider
+        # mezcla los DEFAULTS del motor con la config vigente (esta gana).
+        self.surv = survival.SurvivalGuard(
+            broker, lambda: {**DEFAULTS, **(self.cfg or {})}, logger, config.MAGIC_NUMBER)
 
         # Identidad por ROL de cada posicion del ciclo (persistida por
         # instancia; rehidratable desde los comments de MT5 tras un restart).
@@ -181,21 +190,6 @@ class SentinelEngine:
             net += p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
         return net
 
-    def _net_cap_ok(self, lots, order_type):
-        """True si anadir `lots` en `order_type` no rompe max_net_lots. SIEMPRE
-        permite lo que REDUCE la magnitud del neto (p.ej. el hedge), aunque ya se
-        este sobre el tope; solo frena los adds que LO AGRANDAN mas alla del cap.
-        """
-        cap = float(self._p("max_net_lots"))
-        if cap <= 0:
-            return True  # tope desactivado
-        net = self._net_exposure()
-        delta = lots if order_type == mt5.ORDER_TYPE_BUY else -lots
-        new_net = net + delta
-        if abs(new_net) <= abs(net):
-            return True  # reduce o no cambia el neto: permitido
-        return abs(new_net) <= cap
-
     def _h4_gate_ok(self, order_type):
         """Bloquea promediar CONTRA la estructura H4 confirmada: no comprar si H4
         es bajista, no vender si es alcista. El martingala vive en rangos y muere
@@ -236,7 +230,7 @@ class SentinelEngine:
             lots = max_lot
 
         cap = float(self._p("max_recovery_lots")) if is_recovery else float(self._p("max_entry_lots"))
-        if lots > cap:
+        if cap > 0 and lots > cap:
             lots = cap
         return lots
 
@@ -394,6 +388,30 @@ class SentinelEngine:
         self.log.write("NOTICIAS",
                        f"{what} abierta en ventana de noticia [{modo}]: {self.news_reason}.",
                        balance=self.b.account_balance())
+
+    def _open_additive(self, order_type, lots, comment, role, label):
+        """Unica puerta de las aperturas ADITIVAS (entry / recovery / rescue).
+
+        Recorta el lote al mayor que mantiene el aguante S de la cuenta
+        (SurvivalGuard.fit; 0 = no cabe ni el minimo => no abre), pasa por el
+        gobierno de margen y registra el rol en el ledger. Las protectoras
+        (Hedge Lock / Basket Lock) NO pasan por aqui.
+        Devuelve True solo si la apertura quedo confirmada y registrada.
+        """
+        lots = self.surv.fit(order_type, lots, label)
+        if lots <= 0:
+            return False
+        if not self.gov.can_open(lots, order_type, budget.KIND_ADDITIVE):
+            return False
+        res = self.b.market_order(order_type, lots, comment)
+        if not self._register_open(res, role):
+            return False
+        self._news_note(label)
+        if role == ledger.ROLE_ENTRY:
+            self.cycle.set_meta("ref_lot", lots)
+        elif role == ledger.ROLE_RESCUE:
+            self.cycle.set_meta("rescue_opened", int(self.cycle.get_meta("rescue_opened", 0)) + 1)
+        return True
 
     def _resize_hedge(self, entry, hedge):
         """Encoge el hedge al volumen remanente de la ENTRY (nunca lo agranda).
@@ -873,12 +891,9 @@ class SentinelEngine:
                 dist = self.b.bid() - price_op3
                 if dist >= min_distance and (ignore_rsi or rsi > rescue_rsi):
                     signal = True
-            if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL)
-                    and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_SELL)
-                    and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE)):
-                res = self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
-                if self._register_open(res, ledger.ROLE_RESCUE):
-                    self._news_note(comment)
+            if signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL):
+                self._open_additive(mt5.ORDER_TYPE_SELL, vol_op3, comment,
+                                    ledger.ROLE_RESCUE, comment)
                 self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
             if immediate:
@@ -887,12 +902,9 @@ class SentinelEngine:
                 dist = price_op3 - self.b.ask()
                 if dist >= min_distance and (ignore_rsi or rsi < (100 - rescue_rsi)):
                     signal = True
-            if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY)
-                    and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_BUY)
-                    and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE)):
-                res = self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
-                if self._register_open(res, ledger.ROLE_RESCUE):
-                    self._news_note(comment)
+            if signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY):
+                self._open_additive(mt5.ORDER_TYPE_BUY, vol_op3, comment,
+                                    ledger.ROLE_RESCUE, comment)
                 self.last_rescue_time = self.now
 
     # ==============================================================
@@ -1023,6 +1035,7 @@ class SentinelEngine:
             self.cycle_realized = 0.0
             self._healer_needs_rebaseline = True
             self._cover_protect_logged = False
+            self.cycle.reset_meta()   # ref_lot / rescue_opened / candado: meta del ciclo muerto
 
         current_atr = self._effective_atr()
         point = self.b.point()
@@ -1150,16 +1163,12 @@ class SentinelEngine:
             lots = self._calculate_lots(False)
             if struct_h4 >= 0 and signal_m15 == 1 and self._is_price_good_entry(mt5.ORDER_TYPE_BUY):
                 if self.rsi0 < int(self._p("entry_rsi_max")):
-                    if self.gov.can_open(lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
-                        res = self.b.market_order(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry")
-                        if self._register_open(res, ledger.ROLE_ENTRY):
-                            self._news_note("OP1 BUY")
+                    self._open_additive(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry",
+                                        ledger.ROLE_ENTRY, "OP1 BUY")
             elif struct_h4 <= 0 and signal_m15 == -1 and self._is_price_good_entry(mt5.ORDER_TYPE_SELL):
                 if self.rsi0 > int(self._p("entry_rsi_min")):
-                    if self.gov.can_open(lots, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE):
-                        res = self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
-                        if self._register_open(res, ledger.ROLE_ENTRY):
-                            self._news_note("OP1 SELL")
+                    self._open_additive(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry",
+                                        ledger.ROLE_ENTRY, "OP1 SELL")
 
         # --- ESTADO 2: RECOVERY (ciclo = OP1 + hedge) ---
         elif cycle_count == 2:
@@ -1179,8 +1188,9 @@ class SentinelEngine:
 
             base_lots = self._calculate_lots(False)
             recovery_lots = base_lots * 2.0
-            if recovery_lots > float(self._p("max_recovery_lots")):
-                recovery_lots = float(self._p("max_recovery_lots"))
+            rec_cap = float(self._p("max_recovery_lots"))
+            if rec_cap > 0 and recovery_lots > rec_cap:
+                recovery_lots = rec_cap
 
             if self.atr0 > self.atr1:
                 # OP3 (Fork A): direccion anclada a ESTRUCTURA H4, no a ruido M5. Si
@@ -1193,11 +1203,9 @@ class SentinelEngine:
                     rtype, label = mt5.ORDER_TYPE_SELL, "Recovery Sell (V-Shape)"
                 else:
                     rtype = None
-                if (rtype is not None and self._net_cap_ok(recovery_lots, rtype)
-                        and self.gov.can_open(recovery_lots, rtype, budget.KIND_ADDITIVE)):
-                    res = self.b.market_order(rtype, recovery_lots, label)
-                    if self._register_open(res, ledger.ROLE_RECOVERY):
-                        self._news_note("Recovery")
+                if rtype is not None:
+                    self._open_additive(rtype, recovery_lots, label,
+                                        ledger.ROLE_RECOVERY, "Recovery")
 
         # --- ESTADO 3+: SENTINEL + TRAILING OP3 ---
         elif cycle_count >= 3:

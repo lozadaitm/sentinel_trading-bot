@@ -850,7 +850,9 @@ def run():
     # --- M15: el rescate L2 respeta el bloqueo; el L3-CRITICO esta exento ---
     br, lgr = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
     er = m15_engine(br, lgr)
-    er.cfg = {"news_enforce": True}
+    # survival_move_usd bajo: el fixture (neto SELL 0.60) excede el tope de supervivencia por
+    # diseno; aqui solo se prueba la excepcion de noticias, no el aguante de la cuenta.
+    er.cfg = {"news_enforce": True, "survival_move_usd": 1.0}
     er.news_active, er.news_block, er.news_reason = True, True, "CPI (USD) en 30 min"
     er.now = 1_700_050_000
     er.atr0, er.rsi0, er.struct_h4 = 2.0, 75.0, 0
