@@ -362,9 +362,14 @@ Ninguna alerta cierra ni bloquea nada por sí misma.
   - la migración **solo** toca las columnas nuevas, las cinco puestas a 0 de arriba,
     `news_enforce` y las cuatro con drift: `margin_cap_pct`, `ml_flatten`, `ml_no_add` (por
     `bot_id`) e `inp_max_spread`;
-  - las cuatro con drift se igualan a los valores de `DEFAULTS` de Python del bot
-    correspondiente (`strategy.py` para m15, `strategy_m5.py`/`budget.py` para m5), que son
-    los que usaban las cuentas sin drift;
+  - las cuatro con drift se igualan a los valores que usaba la mayoría de las filas, incluida la
+    cuenta que sobrevivió (39358e52):
+    - m15: `margin_cap_pct` 60, `ml_no_add` 200, `ml_flatten` 0, `inp_max_spread` 350;
+    - m5: `margin_cap_pct` 60, `ml_no_add` 200, `ml_flatten` 0.
+    - *Corrección 13-oct:* los `DEFAULTS` de Python del M5 (10/400/250) eran justo los de la
+      fila con drift (la base), así que **no** se usan como referencia;
+  - la columna `news_enforce` **no existe** en `bot_config` (hoy sale de `DEFAULTS`). La
+    migración la crea con default `true`;
   - **no** toca tamaño (`base_lots`, `base_risk`, `equity_weight`), objetivo de ganancia ni
     nada más del usuario;
   - en comentarios de la propia migración se dejan los valores anteriores y el SQL inverso,
