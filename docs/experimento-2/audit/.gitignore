@@ -1,0 +1,3 @@
+# Datos crudos de la auditoria: se quedan locales (repo publico; bot_logs pesa >100 MB).
+*.csv
+supabase/
