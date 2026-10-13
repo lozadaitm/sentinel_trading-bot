@@ -116,7 +116,13 @@ class CycleLedger:
 
     # --------------------------------------------------------------
     # Meta por ciclo (claves: ref_lot, rescue_opened, lock_since,
-    # lock_initial_volume, unlock_ref_price, last_unlock_ts, last_dissolve_day)
+    # lock_initial_volume, unlock_ref_price, last_unlock_ts, last_dissolve_day,
+    # dissolve_pending).
+    # last_unlock_ts: ultimo aflojado; tras una disolucion completa del candado
+    # guarda tambien la referencia del plazo de 24 h (max(lock_since,
+    # last_unlock_ts) previo) para la disolucion "ambos lados".
+    # dissolve_pending: deuda de una pareja a medias (R14): {"side", "lots",
+    # "tickets", "net_before", "x", "first_tickets", "second_tickets", "lock_case"}.
     # --------------------------------------------------------------
     def get_meta(self, key, default=None):
         return self.meta.get(key, default)

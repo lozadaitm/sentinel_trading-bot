@@ -879,24 +879,97 @@ def test_dissolve_lock_side_only_opposite():
           f"solo Recovery del MISMO lado que LOCK (la ENTRY no cuenta): nada (got {b.partials})")
 
 
-def test_dissolve_second_close_fails():
-    e, b, log = _dissolve_setup()
+def _fail_lock_closes(b):
+    """El broker rechaza cerrar el ticket #5 (LOCK) mientras st['fail']."""
     orig = b.close_partial
+    st = {"fail": True, "tries": 0}
 
     def failing(p, lots, comment="Partial"):
-        if p.ticket == 5:
+        if p.ticket == 5 and st["fail"]:
+            st["tries"] += 1
             class R: retcode = 10006
             return R()
         return orig(p, lots, comment)
     b.close_partial = failing
+    return st
+
+
+def test_dissolve_second_close_fails():
+    """R14: la deuda del segundo cierre se persiste y solo se reintenta ESE resto."""
+    e, b, log = _dissolve_setup()
+    sent = _rec_alerts(e, log)
+    st = _fail_lock_closes(b)
+    net0 = survival.net_lots(b.positions())
     e._maybe_dissolve()
     check(len(b.partials) == 1 and b.partials[0]["ticket"] == 3, "se cerro solo el rojo (#3)")
-    check(e.cycle.get_meta("last_dissolve_day") is None, "sin last_dissolve_day: se reintenta")
+    net1 = survival.net_lots(b.positions())
+    check(abs(net1 - (net0 - 0.10)) < 1e-9, f"neto fuera exactamente X=0.10 (got {net1})")
+    check(e.cycle.get_meta("last_dissolve_day") is None, "sin last_dissolve_day")
+    pend = e.cycle.get_meta("dissolve_pending")
+    check(pend and pend["side"] == "SELL" and abs(pend["lots"] - 0.10) < 1e-9 and pend["tickets"] == [5],
+          f"deuda pendiente SELL 0.10 en #5 (got {pend})")
     errs = [m for t, m in log.events if t == "ERROR"]
-    check(len(errs) == 1, f"un ERROR (got {errs})")
+    check(len(errs) == 1 and "restantes del mismo par" in errs[0], f"un ERROR claro (got {errs})")
+    check(len(sent) == 1 and "CRITICA" in sent[0], f"una alerta CRITICA (got {sent})")
+    tries0 = st["tries"]
     e._maybe_dissolve()
+    check(st["tries"] == tries0, "backoff 60 s: el mismo tick no reintenta")
+    for _ in range(5):
+        e.now += 61
+        e._maybe_dissolve()
+    check(len(b.partials) == 1, f"5 ticks: ninguna pareja nueva (got {b.partials})")
+    check(st["tries"] == tries0 + 5, f"cada tick tras el backoff reintenta #5 (got {st['tries']})")
+    check(abs(survival.net_lots(b.positions()) - net1) < 1e-9, "el neto no se agrava")
     check(len([m for t, m in log.events if t == "ERROR"]) == 1, "ERROR throttled (600 s)")
+    check(len(sent) == 1, "sin alertas extra")
     check(not any(t == "HEALER" for t, m in log.events), "sin log HEALER")
+    # El broker acepta de nuevo: fuera de hora (13 UTC) el reintento igual cierra la deuda.
+    st["fail"] = False
+    e.now = ts(2026, 8, 19, 16)
+    e._maybe_dissolve()
+    check(b.partials[-1]["ticket"] == 5 and abs(b.partials[-1]["lots"] - 0.10) < 1e-9,
+          f"se cierran los 0.10 pendientes de #5 (got {b.partials})")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "neto de vuelta al previo")
+    check(e.cycle.get_meta("dissolve_pending") is None, "deuda limpia")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19", "last_dissolve_day marcado")
+    check(any(t == "HEALER" and m == "Disolucion por parejas: 0.10 lotes de #3 + #5. Neto sin cambio."
+              for t, m in log.events), "log HEALER de la pareja")
+    n = len(b.partials)
+    e.now += 120
+    e._maybe_dissolve()
+    check(len(b.partials) == n, "mismo dia: nada mas")
+
+
+def test_dissolve_pending_survives_restart():
+    from bot import ledger
+    from bot.strategy import SentinelEngine
+    e, b, log = _dissolve_setup()
+    st = _fail_lock_closes(b)
+    net0 = survival.net_lots(b.positions())
+    e._maybe_dissolve()
+    check(e.cycle.get_meta("dissolve_pending") is not None, "deuda pendiente antes del reinicio")
+    st["fail"] = False
+    e2 = SentinelEngine(b, log)
+    e2.cycle = ledger.CycleLedger(e.cycle.path, log)
+    e2.cycle.sync(b.positions())
+    e2.cfg = {"equity_weight": 1.0}
+    e2.now = e.now + 5
+    check(e2.cycle.get_meta("dissolve_pending")["tickets"] == [5], "deuda rehidratada del ledger")
+    e2._maybe_dissolve()
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "tras reinicio: neto de vuelta al previo")
+    check(e2.cycle.get_meta("dissolve_pending") is None, "deuda limpia tras reinicio")
+    check(len(b.partials) == 2, f"ninguna pareja nueva, solo el resto (got {b.partials})")
+
+
+def test_dissolve_pending_cleared_when_gone():
+    e, b, log = _dissolve_setup()
+    _fail_lock_closes(b)
+    e._maybe_dissolve()
+    b._pos = [p for p in b._pos if p.ticket != 5]   # cerrada fuera (p. ej. _close_all)
+    e.now += 61
+    e._maybe_dissolve()
+    check(e.cycle.get_meta("dissolve_pending") is None, "patas de la deuda inexistentes: deuda limpia")
+    check(len(b.partials) == 1, "y no se empieza otra pareja en ese tick")
 
 
 def test_dissolve_both_sides_free():
@@ -1013,6 +1086,8 @@ def main():
     test_dissolve_waits()
     test_dissolve_lock_side_only_opposite()
     test_dissolve_second_close_fails()
+    test_dissolve_pending_survives_restart()
+    test_dissolve_pending_cleared_when_gone()
     test_dissolve_both_sides_free()
     test_dissolve_exhausts_lock()
     test_dissolve_wired_in_tick()
