@@ -857,17 +857,18 @@ def run():
     er.now = 1_700_050_000
     er.atr0, er.rsi0, er.struct_h4 = 2.0, 75.0, 0
     br._price = 4000.0
+    er.cycle.set_meta("ref_lot", 0.20)   # umbrales en movimiento: L2=334, L3=888 con lote 0.20
     legs_r = []
     for i in range(3):
         p = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.20, 3990.0,
                     1_700_000_000 + i, "SMC Sell Entry", config.MAGIC_M15)
-        p.profit = -100.0            # dd ~307 > L2 (300), < L3 (800)
+        p.profit = -115.0            # dd ~352 > L2 (334), < L3 (888)
         br._pos.append(p)
         legs_r.append(p)
     er._check_rescue(legs_r)
     check("M15: rescate L2 bloqueado en ventana dura", len(br.orders) == 0, str(br.orders))
     for p in legs_r:
-        p.profit = -300.0            # dd ~907 > L3 (800): defensa inmediata
+        p.profit = -300.0            # dd ~907 > L3 (888): defensa inmediata
     er._check_rescue(legs_r)
     check("M15: rescate L3-CRITICO exento del bloqueo", len(br.orders) == 1, str(br.orders))
     if br.orders:

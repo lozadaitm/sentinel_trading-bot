@@ -196,6 +196,22 @@ def test_rescue_cooldown_only_when_sent():
             check(e.last_rescue_time == e.now, "rescate enviado pero rechazado SI inicia cooldown")
 
 
+def test_parity_across_accounts():
+    movs = []
+    for eq, ref in ((5000.0, 0.09), (10000.0, 0.19), (20000.0, 0.38)):
+        e, b, log = _eng(equity=eq)
+        e.cycle.set_meta("ref_lot", ref)
+        for k, lvl in ((10, 1), (17, 2), (45, 3)):
+            got = e._rescue_level(k * ref * 100)
+            check(got == lvl, f"eq {eq}: abs_dd k={k} => L{lvl} (got {got})")
+        movs.append(e._move_money(0.83) / ref)
+    check(abs(movs[0] - movs[1]) < 1e-9 and abs(movs[1] - movs[2]) < 1e-9,
+          f"_move_money/ref_lot igual en las 3 cuentas ({movs})")
+    e, b, log = _eng(equity=5000.0)
+    e.cycle.set_meta("ref_lot", 0.09)
+    check(abs(e._move_money(3.33) - 29.97) < 1e-9, "piso Unwind con ref_lot 0.09 = 29.97")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -207,6 +223,7 @@ def main():
     test_no_fixed_lot_caps()
     test_min_lot_account_blocks_once()
     test_rescue_cooldown_only_when_sent()
+    test_parity_across_accounts()
     print("\ntest_supervivencia: TODO OK")
 
 

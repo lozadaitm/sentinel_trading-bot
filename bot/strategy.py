@@ -158,8 +158,25 @@ class SentinelEngine:
     # ==============================================================
     # Utils numericas (UTILS MQL5)
     # ==============================================================
-    def _dynamic_money(self, percent):
-        return (self.b.account_balance() * percent) / 100.0
+    def _ref_lot(self):
+        """Lote de referencia del ciclo (meta ref_lot fijado en la ENTRY); si no hay
+        ciclo, el lote de entrada que dimensionaria hoy."""
+        ref = self.cycle.get_meta("ref_lot")
+        if ref:
+            return float(ref)
+        return float(self._calculate_lots(False))
+
+    def _move_money(self, move_usd):
+        """Dinero que vale un movimiento del oro (USD/oz) con el lote de referencia."""
+        return float(move_usd) * self._ref_lot() * self.b.contract_size()
+
+    def _rescue_level(self, abs_dd):
+        """Nivel de rescate (1, 2 o 3) segun el DD medido en movimiento del precio."""
+        if abs_dd > self._move_money(float(self._p("rescue_l3_move_usd"))):
+            return 3
+        if abs_dd > self._move_money(float(self._p("rescue_l2_move_usd"))):
+            return 2
+        return 1
 
     def _effective_atr(self):
         return max(self.atr0, self.b.point() * 150)
@@ -774,7 +791,7 @@ class SentinelEngine:
 
         current_atr = self._effective_atr()
         atr_mult = float(self._p("unwind_atr_mult"))
-        floor = float(self._p("unwind_money_floor"))
+        floor = self._move_money(float(self._p("unwind_floor_move_usd")))
         pair_tickets = self.cycle.pair_members(positions)
 
         best_single = None
@@ -844,16 +861,15 @@ class SentinelEngine:
 
         current_dd = self._basket_net_profit()
         abs_dd = abs(current_dd)
-        level2 = self._dynamic_money(float(self._p("dd_percent_l2")))
-        level3 = self._dynamic_money(float(self._p("dd_percent_l3")))
+        level = self._rescue_level(abs_dd)
 
         active_atr_mult = float(self._p("rescue_atr_mult"))
         ignore_rsi = False
         immediate = False
-        if abs_dd > level2:
+        if level >= 2:
             active_atr_mult = 3.0
             ignore_rsi = True
-        if abs_dd > level3:
+        if level >= 3:
             active_atr_mult = 2.0
             ignore_rsi = True
             immediate = True  # L3 = ABRE AHORA (sin esperar distancia ni momentum)
@@ -881,9 +897,9 @@ class SentinelEngine:
         rescue_rsi = int(self._p("rescue_rsi"))
 
         comment = "Sentinel Op 4 (L1)"
-        if abs_dd > level2:
+        if level >= 2:
             comment = "Sentinel Op 4 (L2)"
-        if abs_dd > level3:
+        if level >= 3:
             comment = "Sentinel Op 4 (L3-CRITICO)"
 
         signal = False
@@ -1053,14 +1069,10 @@ class SentinelEngine:
         # ============================================================
         if my_positions > 0:
             net_pl = self._basket_net_profit()
-            arm_target = self._dynamic_money(float(self._p("basket_percent")))
-            if arm_target < 2.0:
-                arm_target = 2.0
+            arm_target = self._move_money(float(self._p("basket_arm_move_usd")))
             # Cesta profunda (>=4 core): se arma antes, con el target de rescate.
             if core_count >= 4 and self._p("use_rescue_mode"):
-                rescue_target = self._dynamic_money(float(self._p("rescue_target_pct")))
-                if rescue_target < 2.0:
-                    rescue_target = 2.0
+                rescue_target = self._move_money(float(self._p("rescue_arm_move_usd")))
                 if rescue_target < arm_target:
                     arm_target = rescue_target
 
@@ -1071,11 +1083,12 @@ class SentinelEngine:
             if self.cycle_armed:
                 if net_pl > self.max_cycle_peak:
                     self.max_cycle_peak = net_pl
-                allowed_retrace = float(self._p("fixed_retrace"))
+                allowed_retrace = self._move_money(float(self._p("fixed_retrace_move_usd")))
                 if self._p("use_dynamic_retrace"):
                     vol_money = self._vol_risk_money()
                     allowed_retrace = vol_money * float(self._p("retrace_atr_mult"))
-                    allowed_retrace = max(1.0, min(allowed_retrace, 50.0))
+                    allowed_retrace = max(self._move_money(float(self._p("retrace_min_move_usd"))),
+                                          min(allowed_retrace, self._move_money(float(self._p("retrace_max_move_usd")))))
                 # RF-B: el retroceso se evalua SIEMPRE que este armado, aunque
                 # net_pl haya caido por debajo del target entre ticks.
                 if self.max_cycle_peak - net_pl >= allowed_retrace:
@@ -1088,7 +1101,7 @@ class SentinelEngine:
                     # el Hedge Lock la cubra a hedge_dist. Con >=2 legs la cesta es
                     # real: bankear el neto (con legs rojas individuales) es el
                     # comportamiento deseado y se mantiene intacto.
-                    if core_count == 1 and net_pl < float(self._p("min_green_profit")):
+                    if core_count == 1 and net_pl < self._move_money(float(self._p("min_green_move_usd"))):
                         self.cycle_armed = False
                         self.max_cycle_peak = 0.0
                     else:
