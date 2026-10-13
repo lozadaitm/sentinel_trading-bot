@@ -173,6 +173,29 @@ def test_min_lot_account_blocks_once():
     check(not b.orders and n == 1, f"cuenta chica: 0 ordenes y 1 evento BUDGET (got {len(b.orders)}, {n})")
 
 
+def test_rescue_cooldown_only_when_sent():
+    from bot import ledger
+    for blocked in (True, False):
+        e, b, log = _eng()
+        e.now = 1_700_050_000
+        e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
+        for i in range(3):
+            p = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.20 if blocked else 0.01,
+                        3990.0, 1_700_000_000 + i, "SMC Sell Entry", M15)
+            p.profit = -300.0
+            b._pos.append(p)
+        legs = list(b._pos)
+        if not blocked:
+            class Rej: retcode = 10019; order = 0
+            b.market_order = lambda *a, **k: Rej()
+        e.last_rescue_time = 0
+        e._check_rescue(legs)
+        if blocked:
+            check(not b.orders and e.last_rescue_time == 0, "rescate bloqueado por supervivencia NO inicia cooldown")
+        else:
+            check(e.last_rescue_time == e.now, "rescate enviado pero rechazado SI inicia cooldown")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -183,6 +206,7 @@ def main():
     test_entry_sets_ref_lot_and_rescue_counter()
     test_no_fixed_lot_caps()
     test_min_lot_account_blocks_once()
+    test_rescue_cooldown_only_when_sent()
     print("\ntest_supervivencia: TODO OK")
 
 

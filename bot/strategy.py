@@ -123,6 +123,7 @@ class SentinelEngine:
         self.is_active = False         # espejo de bot_instances.is_active (Supabase) para la UI; lo setea main.trading_loop
         self.user_email = None         # email del usuario (auth.users) para identificar la instancia en la UI
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
+        self._last_additive_sent = False  # _open_additive llego a enviar orden
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -398,12 +399,14 @@ class SentinelEngine:
         (Hedge Lock / Basket Lock) NO pasan por aqui.
         Devuelve True solo si la apertura quedo confirmada y registrada.
         """
+        self._last_additive_sent = False
         lots = self.surv.fit(order_type, lots, label)
         if lots <= 0:
             return False
         if not self.gov.can_open(lots, order_type, budget.KIND_ADDITIVE):
             return False
         res = self.b.market_order(order_type, lots, comment)
+        self._last_additive_sent = True   # salio al broker (confirmada o rechazada)
         if not self._register_open(res, role):
             return False
         self._news_note(label)
@@ -894,7 +897,8 @@ class SentinelEngine:
             if signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL):
                 self._open_additive(mt5.ORDER_TYPE_SELL, vol_op3, comment,
                                     ledger.ROLE_RESCUE, comment)
-                self.last_rescue_time = self.now
+                if self._last_additive_sent:   # cooldown solo si la orden SALIO al broker
+                    self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
             if immediate:
                 signal = True  # L3: defensa inmediata
@@ -905,7 +909,8 @@ class SentinelEngine:
             if signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY):
                 self._open_additive(mt5.ORDER_TYPE_BUY, vol_op3, comment,
                                     ledger.ROLE_RESCUE, comment)
-                self.last_rescue_time = self.now
+                if self._last_additive_sent:   # cooldown solo si la orden SALIO al broker
+                    self.last_rescue_time = self.now
 
     # ==============================================================
     # BUFFERS (equivalente a los CopyBuffer de OnTick)
@@ -1196,7 +1201,7 @@ class SentinelEngine:
                 # OP3 (Fork A): direccion anclada a ESTRUCTURA H4, no a ruido M5. Si
                 # H4 acompana a la cesta se promedia; si H4 volteo en contra, el add
                 # cae al lado opuesto (de-risk con la tendencia) en vez de promediar
-                # contra el movimiento. Gateado por el tope de exposicion neta.
+                # contra el movimiento. Gateado por el tope de supervivencia (_open_additive).
                 if struct_h4 > 0:
                     rtype, label = mt5.ORDER_TYPE_BUY, "Recovery Buy (V-Shape)"
                 elif struct_h4 < 0:
