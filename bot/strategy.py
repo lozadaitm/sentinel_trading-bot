@@ -56,7 +56,7 @@ DEFAULTS = {
     "max_rescue_legs": 3,             # cap de legs de Op4 por ciclo (acota el martingala)
     "use_recovery_h4_gate": True,     # no promediar (recovery/rescue) contra la estructura H4 confirmada
     # --- NewsGuard Fase 1 (bloqueo duro por noticias rojas; ver bot/news.py) ---
-    "news_enforce": False,            # False = OBSERVACION: loguea lo que habria bloqueado, no bloquea
+    "news_enforce": True,             # True = ENFORCEMENT: bloquea aperturas en ventana roja (False = solo observacion)
     "news_pre_seconds": 7200,         # ventana previa: T-2h (una OP1 abierta despues llega al dato sin colchon)
     "news_post_seconds": 3600,        # ventana posterior: T+1h (clusters se funden por solape de ventanas)
     "news_currencies": "USD",         # divisas cuyas rojas cuentan (coma-separado); el oro es un trade de USD
@@ -219,10 +219,11 @@ class SentinelEngine:
             return self.struct_h4 >= 0
         return self.struct_h4 <= 0
 
-    def _rescue_leg_count(self, legs):
-        """Cuenta legs de Op4 vivos DEL CICLO (por rol), para acotar el martingala."""
-        return sum(1 for p in legs
-                   if self.cycle.role_of(p.ticket) == ledger.ROLE_RESCUE)
+    def _risk_hour(self):
+        """True si la hora UTC actual esta en `risk_hours_utc` (aperturas aditivas
+        de rescate/recovery bloqueadas; hedge y gestion nunca se bloquean)."""
+        hours = survival.parse_hours(str(self._p("risk_hours_utc")))
+        return survival.utc_hour_from_server(self.now) in hours
 
     # ==============================================================
     # Lotaje y cierre total
@@ -399,10 +400,10 @@ class SentinelEngine:
         """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
         ventana de noticia. En modo observacion es el dato que calibra los
         umbrales antes de activar el enforcement; con enforcement activo solo
-        puede ocurrir por la excepcion defensiva (rescate L3-CRITICO)."""
+        no deberia ocurrir: el bloqueo no tiene excepciones."""
         if not self.news_active:
             return
-        modo = "excepcion al bloqueo" if self.news_block else "observacion"
+        modo = "bloqueo activo (inesperado)" if self.news_block else "observacion"
         self.log.write("NOTICIAS",
                        f"{what} abierta en ventana de noticia [{modo}]: {self.news_reason}.",
                        balance=self.b.account_balance())
@@ -805,6 +806,11 @@ class SentinelEngine:
                 continue
             dist = abs(p.price_current - p.price_open) / current_atr if current_atr else 0.0
             if (dist >= atr_mult or money >= floor) and money > best_money:
+                # Aguante: no cobrar una pata suelta si cerrarla AUMENTA el neto y
+                # la cuenta quedaria por debajo del movimiento de supervivencia.
+                if (self._closing_increases_exposure(p)
+                        and self.surv.s_after_close(p) < float(self._p("survival_move_usd"))):
+                    continue
                 best_money = money
                 best_single, best_pair = p, None
 
@@ -854,8 +860,12 @@ class SentinelEngine:
             return  # no abrir martingala con spread alto, vela anomala (VCB) ni en close-only
         if len(positions) < 3:
             return
-        if self._rescue_leg_count(positions) >= int(self._p("max_rescue_legs")):
-            return  # cap de legs de Op4: acota el martingala (anti-blowup)
+        if int(self.cycle.get_meta("rescue_opened", 0)) >= int(self._p("max_rescue_legs")):
+            return  # cap de Op4 ABIERTAS en el ciclo (no vivas): corta el bucle abrir-cobrar-reabrir
+        if self.news_block:
+            return  # NewsGuard: sin excepciones, tampoco para el L3
+        if self._risk_hour():
+            return  # horas de riesgo: no se martingalea
         if self.now - self.last_rescue_time < int(self._p("rescue_cooldown")):
             return  # anti-spam (sobre todo en L3 "abre ahora")
 
@@ -873,12 +883,6 @@ class SentinelEngine:
             active_atr_mult = 2.0
             ignore_rsi = True
             immediate = True  # L3 = ABRE AHORA (sin esperar distancia ni momentum)
-
-        # NewsGuard: en ventana dura no se martingalea... salvo el L3-CRITICO,
-        # que es la ultima linea de defensa de un ciclo ya muy herido y no
-        # debe morir por calendario (excepcion defensiva acordada por diseño).
-        if self.news_block and not immediate:
-            return
 
         # Op3 = ultima posicion core abierta (por tiempo)
         last_time = 0
@@ -1192,6 +1196,8 @@ class SentinelEngine:
         elif cycle_count == 2:
             if self.spread_high or self.vol_breaker or self.close_only or self.news_block:
                 return
+            if self._risk_hour():
+                return  # horas de riesgo: sin recovery (el hedge ya esta puesto)
             # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
             # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el
             # precio se haya movido >= ATR*spacing, para no apilar recovery en el

@@ -34,7 +34,7 @@ descubrir en vivo:
   [16]    NewsGuard Fase 1: ventanas duras por rojas USD (pre/post, cluster
           por solape, filtros de divisa/importancia), fail-safe permisivo con
           alerta deduplicada, enforcement vs observacion en ambos motores,
-          cierre preventivo del M5 y excepcion del rescate L3 en el M15.
+          cierre preventivo del M5 y rescate L3 tambien bloqueado en el M15 (sin excepcion).
 
 Uso:  python -m tests.test_m5_and_budget      (desde la raiz del repo)
 """
@@ -802,7 +802,7 @@ def run():
     b20, lg20 = FakeBroker(), FakeLogger()
     b20._price = float(df5n["close"].iloc[-1])
     eng20 = TestEngine(b20, lg20, df5n, series(**UP_M15))
-    eng20.cfg = {}                       # news_enforce=False (default): observacion
+    eng20.cfg = {"news_enforce": False}   # observacion explicita (el default ahora es enforcement)
     eng20.news = FakeGuard(active=True)
     eng20.on_tick()
     check("M5: en observacion el scalp SI abre", len(b20.orders) == 1, str(b20.orders))
@@ -838,7 +838,7 @@ def run():
 
         bn2, lgn2 = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
         en2 = m15_engine(bn2, lgn2)
-        en2.cfg = {}
+        en2.cfg = {"news_enforce": False}   # observacion explicita
         en2.news = FakeGuard(active=True)
         en2.on_tick()
         check("M15: en observacion la OP1 SI abre", len(bn2.orders) == 1, str(bn2.orders))
@@ -847,11 +847,11 @@ def run():
     finally:
         _ind.get_h4_structure, _ind.check_m15_breakout = _orig_h4, _orig_brk
 
-    # --- M15: el rescate L2 respeta el bloqueo; el L3-CRITICO esta exento ---
+    # --- M15: el rescate L2 y el L3-CRITICO respetan el bloqueo (sin excepcion) ---
     br, lgr = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
     er = m15_engine(br, lgr)
     # survival_move_usd bajo: el fixture (neto SELL 0.60) excede el tope de supervivencia por
-    # diseno; aqui solo se prueba la excepcion de noticias, no el aguante de la cuenta.
+    # diseno; aqui solo se prueba el bloqueo de noticias, no el aguante de la cuenta.
     er.cfg = {"news_enforce": True, "survival_move_usd": 1.0}
     er.news_active, er.news_block, er.news_reason = True, True, "CPI (USD) en 30 min"
     er.now = 1_700_050_000
@@ -870,11 +870,9 @@ def run():
     for p in legs_r:
         p.profit = -300.0            # dd ~907 > L3 (888): defensa inmediata
     er._check_rescue(legs_r)
-    check("M15: rescate L3-CRITICO exento del bloqueo", len(br.orders) == 1, str(br.orders))
-    if br.orders:
-        check("...con el comment L3-CRITICO", "L3-CRITICO" in br.orders[0]["comment"])
-        exc = [m for t, m in lgr.events if t == "NOTICIAS" and "excepcion" in m]
-        check("...y auditado como excepcion al bloqueo", len(exc) == 1, str(exc))
+    check("M15: rescate L3-CRITICO tambien bloqueado (sin excepcion)", len(br.orders) == 0, str(br.orders))
+    exc = [m for t, m in lgr.events if t == "NOTICIAS" and "excepcion" in m]
+    check("...y sin evento NOTICIAS de excepcion", len(exc) == 0, str(exc))
 
     print("\n" + "=" * 60)
     if fails:

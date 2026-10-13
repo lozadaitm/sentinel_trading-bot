@@ -109,7 +109,7 @@ DEFAULTS = {
     # NewsGuard Fase 1 (bloqueo duro por rojas; ver bot/news.py). El M5 vive en
     # minutos (TimeStop 45'), por eso su ventana previa es corta: un scalp
     # abierto T-60' casi seguro ya murio o va asegurado cuando llega el dato.
-    "news_enforce": False,        # False = OBSERVACION: loguea, no bloquea ni cierra
+    "news_enforce": True,         # True = ENFORCEMENT (False = observacion: loguea, no bloquea ni cierra)
     "news_pre_seconds": 3600,     # bloqueo de aperturas desde T-60min
     "news_post_seconds": 3600,    # hasta T+1h del ultimo evento del cluster
     "news_currencies": "USD",

@@ -212,6 +212,74 @@ def test_parity_across_accounts():
     check(abs(e._move_money(3.33) - 29.97) < 1e-9, "piso Unwind con ref_lot 0.09 = 29.97")
 
 
+def test_rescue_churn_capped():
+    """19-ago 12:57-13:11 UTC: Op4 abierta, cobrada y reabierta en bucle. El tope
+    cuenta las abiertas en el CICLO (meta rescue_opened), no las vivas."""
+    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False})
+    e.now = ts(2026, 8, 19, 6) + 1800   # 03 UTC: fuera de horas de riesgo
+    e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
+    b._price = 4000.0
+    e.cycle.set_meta("ref_lot", 0.01)
+    legs = []
+    for i in range(3):
+        p = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.01, 3990.0, e.now - 5000 + i,
+                    "SMC Sell Entry", M15)
+        p.profit = -300.0
+        b._pos.append(p)
+        legs.append(p)
+    for _ in range(5):
+        e._check_rescue(legs)
+        for q in list(b._pos):          # "cobrar" la Op4 recien abierta
+            if q not in legs:
+                b._pos.remove(q)
+    check(len(b.orders) == 3, f"tras 3 aperturas la cuarta no se envia (ordenes: {len(b.orders)})")
+    check(e.cycle.get_meta("rescue_opened") == 3, "rescue_opened == 3")
+
+
+def _unwind_setup(buy_vol, buy_pnl, sell_vol, sell_pnl):
+    e, b, log = _eng(equity=5000.0)
+    e.now = ts(2026, 8, 19, 6)
+    e.atr0 = 2.0
+    e.cycle.set_meta("ref_lot", 0.20)
+    e.cycle_realized = 1000.0           # abre el freeze
+    pb = FakePos(1, mt5.POSITION_TYPE_BUY, buy_vol, 4000.0, e.now - 900, "x", M15)
+    ps = FakePos(2, mt5.POSITION_TYPE_SELL, sell_vol, 4000.0, e.now - 800, "x", M15)
+    pb.profit, ps.profit = buy_pnl, sell_pnl
+    b._pos += [pb, ps]
+    return e, b, pb, ps
+
+
+def test_unwind_respects_survival():
+    e, b, pb, ps = _unwind_setup(0.30, -20.0, 0.20, 100.0)
+    e._profit_banking()
+    check(ps in b._pos, "SELL verde 0.20 NO se cobra: dejaria neto 0.30 (S=166 < 350)")
+    # variante: la verde es la BUY y cerrarla REDUCE el neto (0.20 -> 0.10)
+    e, b, pb, ps = _unwind_setup(0.30, 100.0, 0.10, -20.0)
+    e._profit_banking()
+    check(pb not in b._pos, "BUY verde que reduce el neto SI se cobra")
+
+
+def test_risk_hours_block_recovery_and_rescue():
+    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False})
+    e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
+    e.cycle.set_meta("ref_lot", 0.01)
+    legs = []
+    for i in range(3):
+        p = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.01, 3990.0, 1_700_000_000 + i,
+                    "SMC Sell Entry", M15)
+        p.profit = -300.0
+        b._pos.append(p)
+        legs.append(p)
+    e.now = ts(2026, 8, 19, 16) + 1800   # 16:30 servidor = 13:30 UTC
+    check(e._risk_hour() is True, "16:30 servidor (13 UTC) es hora de riesgo")
+    e._check_rescue(legs)
+    check(not b.orders, "en hora de riesgo _check_rescue no envia nada")
+    e.now = ts(2026, 8, 19, 6) + 1800    # 03 UTC
+    check(e._risk_hour() is False, "06:30 servidor (03 UTC) no es hora de riesgo")
+    e._check_rescue(legs)
+    check(len(b.orders) == 1, "fuera de hora de riesgo el rescate si abre")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -224,6 +292,9 @@ def main():
     test_min_lot_account_blocks_once()
     test_rescue_cooldown_only_when_sent()
     test_parity_across_accounts()
+    test_rescue_churn_capped()
+    test_unwind_respects_survival()
+    test_risk_hours_block_recovery_and_rescue()
     print("\ntest_supervivencia: TODO OK")
 
 
