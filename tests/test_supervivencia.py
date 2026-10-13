@@ -796,6 +796,181 @@ def test_relock_resets_unlock_ref():
           f"rebote +50 desde 4300 afloja 0.14 (no hace falta 4501) (LOCK {_lock_vol(e, b)})")
 
 
+# ----------------------------------------------------------------------
+# Disolucion por parejas (spec §5.5)
+# ----------------------------------------------------------------------
+def _dissolve_setup(hours=25.0):
+    """Candado SELL 0.30 desde hace `hours` h, Op3 BUY 0.18 y Op4 BUY 0.12,
+    mas el par ENTRY/HEDGE 0.09/0.09. Neto propio 0 (CONGELADO). 06:00 servidor = 03 UTC."""
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.09, 4400.0, "SMC Buy Entry", profit=-200.0)
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.09, 4400.0, "Hedge Lock", profit=150.0)
+    _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.18, 4400.0, "Recovery Buy (V-Shape)", profit=-180.0)
+    _pos(b, 4, mt5.POSITION_TYPE_BUY, 0.12, 4400.0, "Sentinel Op 4 (L1)", profit=-60.0)
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.30, 4400.0, "Basket Lock", profit=240.0)
+    e.cycle.sync(b.positions())
+    e.cycle.set_meta("lock_since", e.now - int(hours * 3600))
+    e.cycle.set_meta("lock_initial_volume", 0.30)
+    return e, b, log
+
+
+def test_dissolve_pairs():
+    from bot import ledger, strategy
+    e, b, log = _dissolve_setup()
+    check(e.cycle.role_of(2) == ledger.ROLE_HEDGE and e.cycle.role_of(1) == ledger.ROLE_ENTRY,
+          "par ENTRY/HEDGE reconocido")
+    net0 = survival.net_lots(b.positions())
+    check(e._lock_state(b.positions()) == strategy.LOCK_FROZEN, "CONGELADO")
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(3, 0.10), (5, 0.10)],
+          f"primero el rojo (#3 Op3, peor por lote) 0.10 y luego LOCK #5 0.10 (got {b.partials})")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "el neto propio no cambia")
+    vols = {p.ticket: p.volume for p in b.positions()}
+    check(vols[1] == 0.09 and vols[2] == 0.09, "ENTRY y HEDGE intactos")
+    check(abs(vols[3] - 0.08) < 1e-9 and abs(vols[5] - 0.20) < 1e-9 and vols[4] == 0.12,
+          f"Op3 0.08, LOCK 0.20, Op4 0.12 (got {vols})")
+    check(abs(e.cycle_realized - (-100.0 + 80.0)) < 1e-6,
+          f"realizado prorrateado -100+80 (got {e.cycle_realized})")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19", "last_dissolve_day = 2026-08-19")
+    check(any(t == "HEALER" and m == "Disolucion por parejas: 0.10 lotes de #3 + #5. Neto sin cambio."
+              for t, m in log.events), f"log HEALER (got {log.events})")
+    e._maybe_dissolve()
+    check(len(b.partials) == 2, "segunda llamada el mismo dia: nada")
+    # Dia siguiente, 03 UTC: Op3 sigue siendo la peor por lote (-80/0.08); X tope 0.08
+    e.now += 24 * 3600
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials[2:]] == [(5, 0.08)]
+          and 3 not in {p.ticket for p in b.positions()},
+          f"dia 2: Op3 0.08 cerrada entera + 0.08 de LOCK (got {b.partials[2:]})")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "dia 2: neto sin cambio")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-20", "last_dissolve_day = 2026-08-20")
+
+
+def test_dissolve_waits():
+    for name in ("23h", "13utc", "vcb"):
+        e, b, log = _dissolve_setup(hours=23.0 if name == "23h" else 25.0)
+        if name == "13utc":
+            e.now = ts(2026, 8, 19, 16)   # 16:00 servidor = 13 UTC
+            e.cycle.set_meta("lock_since", e.now - 25 * 3600)
+        elif name == "vcb":
+            e.vol_breaker = True
+        e._maybe_dissolve()
+        check(not b.partials and len(b.positions()) == 5
+              and e.cycle.get_meta("last_dissolve_day") is None,
+              f"gate {name}: nada se cierra (got {b.partials})")
+    # 24 h desde el ultimo aflojado (no desde el candado)
+    e, b, log = _dissolve_setup(hours=48.0)
+    e.cycle.set_meta("last_unlock_ts", e.now - 10 * 3600)
+    e._maybe_dissolve()
+    check(not b.partials, "aflojado hace 10 h: nada (el plazo cuenta desde el ultimo aflojado)")
+
+
+def test_dissolve_lock_side_only_opposite():
+    """Contraparte solo Recovery/Op4 del lado contrario al LOCK; ENTRY nunca."""
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.20, 4400.0, "SMC Buy Entry", profit=-300.0)
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Recovery Sell (V-Shape)", profit=-90.0)
+    _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Basket Lock", profit=100.0)
+    e.cycle.sync(b.positions())
+    e.cycle.set_meta("lock_since", e.now - 25 * 3600)
+    e.cycle.set_meta("lock_initial_volume", 0.10)
+    e._maybe_dissolve()
+    check(not b.partials and len(b.positions()) == 3,
+          f"solo Recovery del MISMO lado que LOCK (la ENTRY no cuenta): nada (got {b.partials})")
+
+
+def test_dissolve_second_close_fails():
+    e, b, log = _dissolve_setup()
+    orig = b.close_partial
+
+    def failing(p, lots, comment="Partial"):
+        if p.ticket == 5:
+            class R: retcode = 10006
+            return R()
+        return orig(p, lots, comment)
+    b.close_partial = failing
+    e._maybe_dissolve()
+    check(len(b.partials) == 1 and b.partials[0]["ticket"] == 3, "se cerro solo el rojo (#3)")
+    check(e.cycle.get_meta("last_dissolve_day") is None, "sin last_dissolve_day: se reintenta")
+    errs = [m for t, m in log.events if t == "ERROR"]
+    check(len(errs) == 1, f"un ERROR (got {errs})")
+    e._maybe_dissolve()
+    check(len([m for t, m in log.events if t == "ERROR"]) == 1, "ERROR throttled (600 s)")
+    check(not any(t == "HEALER" for t, m in log.events), "sin log HEALER")
+
+
+def test_dissolve_both_sides_free():
+    """LIBRE: sin LOCK, Op3/Op4 en ambos lados con neto < step => se emparejan las peores."""
+    from bot import strategy
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.09, 4400.0, "SMC Buy Entry", profit=-500.0)
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.09, 4400.0, "Hedge Lock", profit=450.0)
+    _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "Recovery Buy (V-Shape)", profit=-50.0)
+    _pos(b, 4, mt5.POSITION_TYPE_BUY, 0.05, 4400.0, "Sentinel Op 4 (L1)", profit=-40.0)
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.15, 4400.0, "Recovery Sell (V-Shape)", profit=30.0)
+    e.cycle.sync(b.positions())
+    check(e._lock_state(b.positions()) == strategy.LOCK_FREE, "LIBRE")
+    e._maybe_dissolve()
+    check(not b.partials and len(b.positions()) == 5,
+          "sin lock_since ni last_unlock_ts: el plazo falla, nada")
+    e.cycle.set_meta("last_unlock_ts", e.now - 25 * 3600)
+    net0 = survival.net_lots(b.positions())
+    e._maybe_dissolve()
+    check(4 not in {p.ticket for p in b.positions()}
+          and [(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(5, 0.05)],
+          f"peor BUY (#4, -800/lote) 0.05 entera y SELL #5 0.05 parcial (got {b.partials})")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "neto sin cambio")
+    check({p.ticket: p.volume for p in b.positions()}.get(1) == 0.09, "ENTRY intacta")
+    check(any(t == "HEALER" and m == "Disolucion por parejas: 0.05 lotes de #4 + #5. Neto sin cambio."
+              for t, m in log.events), "log HEALER ambos lados")
+    # neto de Op3/Op4 >= step => nada
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "Recovery Buy (V-Shape)", profit=-50.0)
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.05, 4400.0, "Recovery Sell (V-Shape)", profit=30.0)
+    e.cycle.sync(b.positions())
+    e.cycle.set_meta("last_unlock_ts", e.now - 25 * 3600)
+    e._maybe_dissolve()
+    check(not b.partials and len(b.positions()) == 2, "Op3/Op4 con neto 0.05 >= step: nada")
+
+
+def test_dissolve_exhausts_lock():
+    """Al agotarse las patas LOCK por disolucion: estado LIBRE y meta del candado limpia,
+    conservando la referencia del plazo en last_unlock_ts."""
+    from bot import strategy
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "Recovery Buy (V-Shape)", profit=-100.0)
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Basket Lock", profit=100.0)
+    e.cycle.sync(b.positions())
+    since = e.now - 25 * 3600
+    e.cycle.set_meta("lock_since", since)
+    e.cycle.set_meta("lock_initial_volume", 0.30)   # X = 0.10 (tope: vol LOCK)
+    e._maybe_dissolve()
+    check(not b.positions(), f"ambas patas cerradas enteras (quedan {b.positions()})")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FREE, "LIBRE")
+    for k in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+        check(e.cycle.get_meta(k) is None, f"{k} a None")
+    check(e.cycle.get_meta("last_unlock_ts") == since, "last_unlock_ts = referencia del plazo")
+
+
+def test_dissolve_wired_in_tick():
+    from bot import strategy
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=5000.0)
+        e.cfg = {"equity_weight": 1.0}
+        _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.18, 4400.0, "Recovery Buy (V-Shape)", profit=-180.0)
+        _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.18, 4400.0, "Basket Lock", profit=180.0)
+        b._price = 4400.0
+        e.cycle.sync(b.positions())
+        e.cycle.set_meta("lock_since", e.now - 25 * 3600)
+        e.cycle.set_meta("lock_initial_volume", 0.18)
+        e.on_tick()
+        check(abs(_lock_vol(e, b) - 0.12) < 1e-9, f"on_tick disuelve 0.06 (LOCK {_lock_vol(e, b)})")
+        check(e.lock_state == strategy.LOCK_FROZEN, "sigue CONGELADO (neto 0)")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -834,6 +1009,13 @@ def main():
     test_unlock_wired_in_tick()
     test_unlock_buy_lock_mirror()
     test_relock_resets_unlock_ref()
+    test_dissolve_pairs()
+    test_dissolve_waits()
+    test_dissolve_lock_side_only_opposite()
+    test_dissolve_second_close_fails()
+    test_dissolve_both_sides_free()
+    test_dissolve_exhausts_lock()
+    test_dissolve_wired_in_tick()
     print("\ntest_supervivencia: TODO OK")
 
 

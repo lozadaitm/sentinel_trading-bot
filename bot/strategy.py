@@ -143,6 +143,7 @@ class SentinelEngine:
         self._lock_fail_next_log = 0  # throttle del ERROR de candado fallido
         self._lock_sl_err_next = 0    # throttle del ERROR de SL no limpiado con candado
         self._unlock_err_next = 0     # throttle del ERROR/SHADOW del aflojado del candado
+        self._dissolve_err_next = 0   # throttle del ERROR/SHADOW de la disolucion por parejas
         self._hedge_fail_next = {}    # ticket -> proximo ERROR de "Hedge Lock FALLIDO"
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
@@ -623,6 +624,159 @@ class SentinelEngine:
             # Ultima pata LOCK cerrada: estado LIBRE (se conserva last_unlock_ts).
             for key in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
                 self.cycle.set_meta(key, None)
+
+    def _utc_day(self):
+        """Fecha UTC (YYYY-MM-DD) de la hora de servidor self.now."""
+        off_h = ((int(self.now) // 3600) - survival.utc_hour_from_server(self.now)) % 24
+        utc_ts = int(self.now) - off_h * 3600
+        return (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=utc_ts)).date().isoformat()
+
+    def _maybe_dissolve(self):
+        """Disolucion diaria por parejas del candado sin re-exponer (spec §5.5).
+
+        Corre en CONGELADO, AFLOJADO y en LIBRE (caso "ambos lados"), justo
+        despues de _maybe_unlock. Cierra X lotes de las patas LOCK y X lotes de
+        la contraparte (Recovery/Op4 del lado contrario con peor dinero por
+        lote): lados opuestos y lotes iguales => el neto NO cambia. Nunca toca
+        ENTRY, HEDGE, ORPHAN ni sus coberturas. Primero el miembro rojo: si el
+        segundo cierre fallara, lo que queda vivo es el verde.
+        """
+        # 1. Gates: plazo desde el ultimo candado/aflojado, hora UTC, una vez al dia, VCB.
+        ref_ts = max(float(self.cycle.get_meta("lock_since") or 0),
+                     float(self.cycle.get_meta("last_unlock_ts") or 0))
+        if ref_ts <= 0:
+            return
+        if self.now - ref_ts < float(self._p("lock_dissolve_after_h")) * 3600 - 1e-9:
+            return
+        if survival.utc_hour_from_server(self.now) not in survival.parse_hours(
+                self._p("lock_dissolve_hours_utc")):
+            return
+        day = self._utc_day()
+        if self.cycle.get_meta("last_dissolve_day") == day:
+            return
+        if self.vol_breaker:
+            return
+
+        positions = self.b.positions()
+        step = self.b.volume_step()
+        vmin = self.b.volume_min()
+        cp_roles = (ledger.ROLE_RECOVERY, ledger.ROLE_RESCUE)
+        cps = [p for p in positions if self.cycle.role_of(p.ticket) in cp_roles]
+
+        def per_lot(p):
+            return (p.profit + p.swap) / p.volume if p.volume > 0 else 0.0
+
+        legs = self.cycle.lock_legs(positions)
+        if legs:
+            # 2. Con patas LOCK: contraparte del lado contrario al neto LOCK.
+            lock_net = survival.net_lots(legs)
+            if abs(lock_net) < step - 1e-9:
+                return
+            lock_type = mt5.POSITION_TYPE_SELL if lock_net < 0 else mt5.POSITION_TYPE_BUY
+            legs = [p for p in legs if p.type == lock_type]
+            opp = [p for p in cps if p.type != lock_type]
+            if not opp:
+                return
+            cp = min(opp, key=per_lot)
+            lock_total = round(sum(p.volume for p in legs), 8)
+            init = self.cycle.get_meta("lock_initial_volume")
+            init = float(init) if init else lock_total
+            frac = float(self._p("lock_dissolve_fraction"))
+            x = max(vmin, math.floor(frac * init / step + 1e-9) * step)
+            x = round(min(x, lock_total, cp.volume), 8)
+            # Patas LOCK: de la mas nueva a la mas vieja (igual que el aflojado).
+            legs.sort(key=lambda p: (p.time, p.ticket), reverse=True)
+            side_a, side_b = legs, [cp]
+        else:
+            # 3. Sin LOCK: Op3/Op4 de ambos lados con neto propio < step.
+            buys = [p for p in cps if p.type == mt5.POSITION_TYPE_BUY]
+            sells = [p for p in cps if p.type == mt5.POSITION_TYPE_SELL]
+            if not buys or not sells:
+                return
+            if abs(survival.net_lots(cps)) >= step - 1e-9:
+                return
+            wb, ws = min(buys, key=per_lot), min(sells, key=per_lot)
+            x = round(min(wb.volume, ws.volume), 8)
+            side_a, side_b = [wb], [ws]
+        if x < vmin - 1e-9 or x < step - 1e-9:
+            return
+
+        def portion_pl(member, lots):
+            pl, rem = 0.0, lots
+            for p in member:
+                if rem < step - 1e-9:
+                    break
+                take = min(p.volume, rem)
+                pl += (p.profit + p.swap) * take / p.volume
+                rem = round(rem - take, 8)
+            return pl
+
+        # 4. Primero el miembro rojo y luego el verde.
+        if portion_pl(side_a, x) <= portion_pl(side_b, x):
+            first, second = side_a, side_b
+        else:
+            first, second = side_b, side_a
+        t1, t2 = first[0].ticket, second[0].ticket
+
+        if self.b.shadow:
+            if self.now >= self._dissolve_err_next:
+                self._dissolve_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
+                self.log.write("SHADOW", f"Disolucion (sombra): se cerrarian {x:.2f} lotes "
+                                         f"de #{t1} + #{t2}.", balance=self.b.account_balance())
+            return
+
+        closed1, real1, fail1 = self._dissolve_close(first, x, step)
+        if closed1 <= 0:
+            self._dissolve_error(f"Disolucion por parejas RECHAZADA en #{fail1} "
+                                 f"(nada cerrado). Se reintenta en el proximo tick.")
+            return
+        # El segundo miembro cierra exactamente lo que se cerro del primero.
+        closed2, real2, fail2 = self._dissolve_close(second, closed1, step)
+        self.cycle_realized += real1 + real2
+        if fail1 is not None or closed2 < closed1 - 1e-9:
+            self._dissolve_error(f"Disolucion por parejas INCOMPLETA: cerrados {closed1:.2f} de "
+                                 f"#{t1} y {closed2:.2f} de #{t2} (rechazo en "
+                                 f"#{fail2 if fail2 is not None else fail1}). Se reintenta.")
+            return
+
+        self.cycle.set_meta("last_dissolve_day", day)
+        self.log.write("HEALER",
+                       f"Disolucion por parejas: {closed1:.2f} lotes de #{t1} + #{t2}. Neto sin cambio.",
+                       lots=closed1, balance=self.b.account_balance(), ticket=t1)
+        if legs and not self.cycle.lock_legs(self.b.positions()):
+            # Ultima pata LOCK disuelta: estado LIBRE. La referencia del plazo
+            # (ultimo candado/aflojado) se conserva en last_unlock_ts para el
+            # caso "ambos lados".
+            self.cycle.set_meta("last_unlock_ts", ref_ts)
+            for key in ("unlock_ref_price", "lock_since", "lock_initial_volume"):
+                self.cycle.set_meta(key, None)
+
+    def _dissolve_close(self, member, lots, step):
+        """Cierra `lots` de las patas de un miembro (en orden). Solo cuenta lo
+        confirmado con retcode DONE. Devuelve (cerrado, realizado, ticket_fallido)."""
+        remaining, closed, realized = round(lots, 8), 0.0, 0.0
+        for p in member:
+            if remaining < step - 1e-9:
+                break
+            take = round(min(p.volume, remaining), 8)
+            frac = take / p.volume
+            pl = (p.profit + p.swap) * frac   # antes del cierre (el volumen cambia)
+            if take >= p.volume - 1e-9:
+                res = self.b.close_position(p, "Basket Dissolve")
+            else:
+                res = self.b.close_partial(p, take, "Basket Dissolve")
+            if getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+                return closed, realized, p.ticket
+            closed = round(closed + take, 8)
+            realized += pl
+            remaining = round(remaining - take, 8)
+        return closed, realized, None
+
+    def _dissolve_error(self, msg):
+        """ERROR de la disolucion, como mucho cada 600 s."""
+        if self.now >= self._dissolve_err_next:
+            self._dissolve_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
+            self.log.write("ERROR", msg, balance=self.b.account_balance())
 
     def _clear_lock_sls(self, positions):
         """Con candado vivo ningun leg propio puede llevar SL (un SL que salte
@@ -1365,6 +1519,7 @@ class SentinelEngine:
         # estado se calcula con las posiciones releidas (puede haberse puesto).
         self._maybe_lock()
         self._maybe_unlock()   # §5.4: solo con rebote confirmado (no-op sin patas LOCK)
+        self._maybe_dissolve() # §5.5: una vez al dia, por parejas, sin cambiar el neto
         _pos_now = self.b.positions()
         self.lock_state = self._lock_state(_pos_now)
         frozen = self.lock_state == LOCK_FROZEN
