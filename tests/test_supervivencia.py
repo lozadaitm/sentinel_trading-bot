@@ -1355,6 +1355,171 @@ FIX_WAVE = [
 ]
 
 
+# --------------------------------------------------------------
+# Lote 1: lecturas fallidas, avisos y relojes (A1, A5, A6, A7)
+# --------------------------------------------------------------
+def test_margin_level_unknown_is_none():
+    """A1: Broker.margin_level() con account_info() fallido devuelve None (no 0.0)."""
+    from bot import broker as broker_mod
+    bk = broker_mod.Broker.__new__(broker_mod.Broker)
+    orig = broker_mod.mt5.account_info
+    try:
+        broker_mod.mt5.account_info = lambda: None
+        check(bk.margin_level() is None, "margin_level None si account_info falla")
+        broker_mod.mt5.account_info = lambda: type("I", (), {"margin": 0.0, "margin_level": 0.0})()
+        check(bk.margin_level() == float("inf"), "sin margen usado => inf")
+        broker_mod.mt5.account_info = lambda: type("I", (), {"margin": 10.0, "margin_level": 321.0})()
+        check(bk.margin_level() == 321.0, "con margen usado => el nivel real")
+    finally:
+        broker_mod.mt5.account_info = orig
+
+
+def test_budget_ml_unknown_blocks_additive():
+    """A1: ML desconocido => NO_ADD (nunca FLATTEN); can_open bloquea con motivo legible."""
+    from bot import budget
+    e, b, log = _eng()
+    b.ml = None
+    check(e.gov.posture() == budget.POSTURE_NO_ADD and not e.gov.should_flatten(),
+          "posture NO_ADD y sin flatten con ML None")
+    check(e.gov.can_open(0.05, BUY) is False and "n/a" in (e.gov.last_block or ""),
+          f"can_open bloquea y el motivo dice n/a (got {e.gov.last_block})")
+    check(e.gov.can_open(0.05, BUY, budget.KIND_PROTECTIVE) is True, "las protectoras siguen pasando")
+    b.ml = float("inf")
+    check(e.gov.posture() == budget.POSTURE_NORMAL, "con ML real vuelve a NORMAL")
+
+
+def test_alert_send_failure_allows_retry():
+    """A5: un envio fallido (excepcion o False) no consume la espera de 6 h."""
+    from bot import alerts
+    t = [1000.0]
+    calls, mode = [], ["raise"]
+
+    def sender(to, s, b, lg=None):
+        calls.append(s)
+        if mode[0] == "raise":
+            raise RuntimeError("smtp caido")
+        if mode[0] == "false":
+            return False
+        return None   # como send_async: None = lanzado
+
+    log = FakeLogger()
+    m = alerts.AlertManager(log, "a@b.c", "x", sender=sender, clock=lambda: t[0])
+    check(m.notify("k", "AVISO", "s", "b") is False and "k" not in m._last,
+          "excepcion => False y sin consumir la espera")
+    check(any(tp == "ERROR" for tp, _ in log.events), "el fallo se loguea")
+    check(m.notify("k", "AVISO", "s", "b") is False and len(calls) == 1,
+          "reintento inmediato en pausa corta (no un intento por tick)")
+    t[0] += alerts.RETRY_AFTER_FAIL_S + 1
+    mode[0] = "false"
+    check(m.notify("k", "AVISO", "s", "b") is False and len(calls) == 2 and "k" not in m._last,
+          "sender que devuelve False => tampoco consume la espera")
+    t[0] += alerts.RETRY_AFTER_FAIL_S + 1
+    mode[0] = "ok"
+    check(m.notify("k", "AVISO", "s", "b") is True and len(calls) == 3, "al funcionar, envia (reintento permitido)")
+    t[0] += 3600
+    check(m.notify("k", "AVISO", "s", "b") is False and len(calls) == 3, "tras el exito el dedupe de 6 h aplica")
+    # Con un envio previo exitoso, un fallo restaura el _last anterior (no lo borra).
+    t[0] += 6 * 3600 + 1
+    prev = m._last["k"]
+    mode[0] = "false"
+    check(m.notify("k", "AVISO", "s", "b") is False and m._last["k"] == prev,
+          "fallo tras un exito previo restaura el _last previo")
+    t[0] += alerts.RETRY_AFTER_FAIL_S + 1
+    mode[0] = "ok"
+    check(m.notify("k", "AVISO", "s", "b") is True, "y el siguiente intento si sale")
+
+
+def test_zero_equity_needs_two_ticks():
+    """A6: equity <= 0 solo es cuenta muerta tras 2 lecturas en ticks distintos."""
+    from bot import alerts
+    e, b, log = _eng(equity=0.0)
+    sent = _rec_alerts(e, log)
+    e.now = 1_700_000_000
+    alerts.update_dead(e)
+    check(not e.dead and not sent, "una lectura 0 => ni dead ni CRITICA")
+    alerts.update_dead(e)
+    check(not e.dead and not sent, "mismo tick repetido no confirma")
+    b._equity = 5000.0
+    e.now += 1
+    alerts.update_dead(e)
+    e.now += 1
+    b._equity = 0.0
+    alerts.update_dead(e)
+    check(not e.dead and not sent, "0, positiva, 0 => la racha se corta (sin dead)")
+    e.now += 1
+    alerts.update_dead(e)
+    check(e.dead and len(sent) == 1 and "CRITICA" in sent[0], f"2 lecturas 0 seguidas => dead + CRITICA (got {sent})")
+    # Equity desconocido (None) tambien corta la racha.
+    e2, b2, log2 = _eng(equity=0.0)
+    sent2 = _rec_alerts(e2, log2)
+    e2.now = 1_700_000_000
+    alerts.update_dead(e2)
+    b2.acct_fail = True
+    e2.now += 1
+    alerts.update_dead(e2)
+    b2.acct_fail = False
+    e2.now += 1
+    alerts.update_dead(e2)
+    check(not e2.dead and not sent2, "0, None, 0 => no confirma")
+    # trade_allowed falso se mantiene inmediato.
+    e3, b3, log3 = _eng(equity=5000.0)
+    sent3 = _rec_alerts(e3, log3)
+    b3.trade_allowed = lambda: (False, "AutoTrading apagado")
+    e3.now = 1_700_000_000
+    alerts.update_dead(e3)
+    check(e3.dead and len(sent3) == 1, "trade_allowed falso => muerta al instante (sin confirmacion)")
+    # Llamada directa (sin engine): evaluacion inmediata, como antes.
+    check(alerts.account_dead(SurvBroker(equity=0.0)) == (True, "equity <= 0"), "account_dead(broker) directo sigue inmediato")
+
+
+def test_history_windows_use_server_time():
+    """A7: init_history_cursor (M15) y _refresh_last_trade_result (M5) usan hora de servidor."""
+    import datetime as _dt
+    from bot.strategy_m5 import M5Engine
+    server_now = 1_700_000_000                 # hora de servidor (epoch "de MT5")
+    srv = _dt.datetime.utcfromtimestamp(server_now)
+    # M15 con tick disponible antes de on_tick (arranque): now==0 => toma tick.time.
+    e, b, log = _eng()
+    calls = []
+    b.history_deals = lambda a, c: (calls.append((a, c)), [])[1]
+    e._fetch_tick = lambda: type("T", (), {"time": server_now})()
+    e.init_history_cursor()
+    f, t = calls[0]
+    check(t == srv + _dt.timedelta(minutes=5) and t - f == _dt.timedelta(days=7),
+          f"M15 init_history_cursor: ventana en hora servidor (got {f}..{t})")
+    # Sin tick: cae al reloj local, sin romper.
+    e, b, log = _eng()
+    calls = []
+    b.history_deals = lambda a, c: (calls.append((a, c)), [])[1]
+    e._fetch_tick = lambda: None
+    e.init_history_cursor()
+    check(len(calls) == 1 and calls[0][1].year >= 2024, "sin tick: fallback al reloj local, sin excepcion")
+    # M5
+    b5 = SurvBroker(magic=M5)
+    calls5 = []
+    b5.history_deals = lambda a, c: (calls5.append((a, c)), [])[1]
+    m5 = M5Engine(b5, FakeLogger())
+    m5._fetch_tick = lambda: type("T", (), {"time": server_now})()
+    m5.init_history_cursor()
+    f, t = calls5[0]
+    check(t == srv + _dt.timedelta(minutes=5) and t - f == _dt.timedelta(days=7),
+          f"M5 init: ventana en hora servidor (got {f}..{t})")
+    m5.now = server_now + 3600
+    m5._refresh_last_trade_result()
+    f, t = calls5[1]
+    check(t == _dt.datetime.utcfromtimestamp(m5.now) + _dt.timedelta(minutes=5),
+          "M5 _refresh_last_trade_result: ventana termina en now servidor + 5 min")
+
+
+LOTE1 = [
+    test_margin_level_unknown_is_none,
+    test_budget_ml_unknown_blocks_additive,
+    test_alert_send_failure_allows_retry,
+    test_zero_equity_needs_two_ticks,
+    test_history_windows_use_server_time,
+]
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -1403,6 +1568,8 @@ def main():
     test_dissolve_exhausts_lock()
     test_dissolve_wired_in_tick()
     for t in FIX_WAVE:
+        t()
+    for t in LOTE1:
         t()
     print("\ntest_supervivencia: TODO OK")
 

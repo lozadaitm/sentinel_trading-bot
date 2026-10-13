@@ -176,7 +176,11 @@ class SentinelEngine:
         que basta una ventana amplia. Se usa max(ticket) en vez de deals[-1] para
         no depender del orden de retorno del broker.
         """
-        to_dt = datetime.datetime.now() + datetime.timedelta(minutes=5)
+        if not self.now:   # aun sin tick (arranque): hora de servidor del ultimo tick
+            tick = self._fetch_tick()
+            if tick is not None:
+                self.now = tick.time
+        to_dt = self._deal_window_end()   # hora de servidor (R9), no la del PC
         from_dt = to_dt - datetime.timedelta(days=7)
         deals = self.b.history_deals(from_dt, to_dt)
         if deals:
@@ -1583,7 +1587,12 @@ class SentinelEngine:
         return datetime.datetime.utcfromtimestamp(self.now)
 
     def _deal_window_end(self):
-        """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min."""
+        """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min.
+
+        Sin tick todavia (now == 0) cae al reloj local: la ventana es ancha y no importa el desfase.
+        """
+        if not self.now:
+            return datetime.datetime.now() + datetime.timedelta(minutes=5)
         return self._server_dt() + datetime.timedelta(minutes=5)
 
     def _check_stop_out(self):

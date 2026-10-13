@@ -126,7 +126,7 @@ DEFAULTS = {
     "margin_cap_pct": 10.0,
     "peer_reserve_mult": 1.5,
     "ml_no_add": 400.0,
-    "ml_flatten": 250.0,
+    "ml_flatten": 0.0,
 }
 
 
@@ -252,7 +252,11 @@ class M5Engine:
         Alimenta el Surfer: tras una ganadora se permite entrar sin exigir el
         umbral de RSI de confirmacion.
         """
-        to_dt = datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+        if not self.now:   # aun sin tick (arranque): hora de servidor del ultimo tick
+            tick = self._fetch_tick()
+            if tick is not None:
+                self.now = tick.time
+        to_dt = self._deal_window_end()   # hora de servidor (R9), no la del PC
         from_dt = to_dt - datetime.timedelta(days=7)
         try:
             deals = self.b.history_deals(from_dt, to_dt)
@@ -513,6 +517,15 @@ class M5Engine:
     def _server_dt(self):
         return datetime.datetime.utcfromtimestamp(self.now)
 
+    def _deal_window_end(self):
+        """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min.
+
+        Sin tick todavia (now == 0) cae al reloj local: la ventana es ancha y no importa el desfase.
+        """
+        if not self.now:
+            return datetime.datetime.now() + datetime.timedelta(minutes=5)
+        return self._server_dt() + datetime.timedelta(minutes=5)
+
     # ==============================================================
     # HUD (snapshot read-only para la TUI; NO afecta el trading)
     # ==============================================================
@@ -599,8 +612,9 @@ class M5Engine:
                       f"{int(self._p('m5_start_hour'))}h - {int(self._p('m5_end_hour'))}h", in_hours))
         ml = self.b.margin_level()
         min_ml = float(self._p("m5_min_margin_level"))
-        gates.append(("Nivel de margen", "inf" if ml == float("inf") else f"{ml:.0f}%",
-                      f">= {min_ml:.0f}%", ml >= min_ml))
+        ml_txt = "n/a" if ml is None else ("inf" if ml == float("inf") else f"{ml:.0f}%")
+        gates.append(("Nivel de margen", ml_txt, f">= {min_ml:.0f}%",
+                      ml is not None and ml >= min_ml))
         budget_ok = self.gov.probe(lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE)
         gates.append(("Presupuesto", self.gov.last_block or f"{self.b.margin_free():.0f} libre",
                       f"req {lots:.2f} lot", budget_ok))
@@ -715,8 +729,9 @@ class M5Engine:
             return
         if not in_hours:
             return
-        if self.b.margin_level() < float(self._p("m5_min_margin_level")):
-            return
+        ml = self.b.margin_level()
+        if ml is None or ml < float(self._p("m5_min_margin_level")):
+            return  # margen desconocido (MT5 sin respuesta): no se abre
         if self.bar_time == self.last_candle_time:
             return  # ya se opero en esta vela
         if self._my_positions():

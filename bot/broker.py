@@ -159,10 +159,14 @@ class Broker:
     # Margen
     # --------------------------------------------------------------
     def margin_level(self):
-        """Nivel de margen en % (equity/margin*100). Infinito si no hay margen usado."""
+        """Nivel de margen en % (equity/margin*100). Infinito si no hay margen usado.
+
+        None si MT5 no responde: desconocido, nunca 0 % (un 0 falso dispararia el
+        FLATTEN del presupuesto). Los llamadores lo tratan como "no se sabe".
+        """
         info = mt5.account_info()
         if info is None:
-            return 0.0
+            return None
         if not info.margin:
             return float("inf")  # sin posiciones: no hay presion de margen
         return info.margin_level

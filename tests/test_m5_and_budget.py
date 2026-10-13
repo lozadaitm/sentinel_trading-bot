@@ -898,6 +898,81 @@ def run():
     exc = [m for t, m in lgr.events if t == "NOTICIAS" and "excepcion" in m]
     check("...y sin evento NOTICIAS de excepcion", len(exc) == 0, str(exc))
 
+    # ---------- 22. Lote 1 (A1/A6): margen desconocido, equity 0 pasajera, dead-gate del M5 ----------
+    from bot import alerts as _alerts
+    from bot.strategy_m5 import DEFAULTS as _M5D
+    print("\n[22] Lote 1: margin_level None / dead-gate")
+    check("default de codigo ml_flatten del M5 = 0.0", _M5D["ml_flatten"] == 0.0)
+    gov22 = budget.MarginGovernor(FakeBroker(magic=config.MAGIC_M5), lambda: cfg_m5,
+                                  budget.ROLE_JUNIOR, logger=FakeLogger())
+    gov22.b.ml = None
+    check("posture con ML None = NO_ADD (nunca FLATTEN)", gov22.posture() == budget.POSTURE_NO_ADD)
+    check("should_flatten False con ML None", not gov22.should_flatten())
+    check("ML None bloquea aditivas sin excepcion",
+          not gov22.can_open(0.05, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE))
+    check("ML None bloquea aun con ml_no_add = 0 (off)",
+          budget.MarginGovernor(gov22.b, lambda: {"ml_no_add": 0.0, "ml_flatten": 0.0},
+                                budget.ROLE_JUNIOR, logger=FakeLogger()).posture() == budget.POSTURE_NO_ADD)
+    # M5: ML None => no abre y no liquida lo vivo, aunque ml_flatten este activo.
+    b22, lg22 = FakeBroker(), FakeLogger()
+    df22 = series(**SURFER_M5)
+    b22._price = float(df22["close"].iloc[-1]); b22.ml = None
+    e22 = TestEngine(b22, lg22, df22, series(**UP_M15)); e22.cfg = {}
+    e22.on_tick()
+    check("M5: ML None no abre", len(b22.orders) == 0, str(b22.orders))
+    gates22 = {g[0]: g for g in e22.hud.get("gates", [])}
+    ml_gate = gates22.get("Nivel de margen")
+    check("M5: panel de gates muestra n/a y no pasa",
+          ml_gate is not None and ml_gate[1] == "n/a" and ml_gate[3] is False, str(ml_gate))
+    b22b, lg22b = FakeBroker(), FakeLogger()
+    b22b._price = b22._price; b22b.ml = None
+    b22b._pos.append(FakePos(11, mt5.POSITION_TYPE_BUY, 0.05, 4000.0, 0, "M5 Surfer Buy", b22b.magic))
+    e22b = TestEngine(b22b, lg22b, df22, series(**UP_M15)); e22b.cfg = {"ml_flatten": 250.0}
+    e22b.on_tick()
+    check("M5: ML None no liquida la posicion viva", len(b22b._pos) == 1)
+    # Con la config de codigo (ml_flatten 0.0) un ML bajo real tampoco liquida.
+    b22c = FakeBroker(); b22c._price = b22._price; b22c.ml = 200.0
+    b22c._pos.append(FakePos(12, mt5.POSITION_TYPE_BUY, 0.05, 4000.0, 0, "M5 Surfer Buy", b22c.magic))
+    e22c = TestEngine(b22c, FakeLogger(), df22, series(**UP_M15)); e22c.cfg = {}
+    e22c.on_tick()
+    check("M5: con el default de codigo ML 200% no liquida", len(b22c._pos) == 1)
+
+    # Dead-gate del M5: el gate es lo que impide abrir (control: sin dead, abre).
+    b23, b23c = FakeBroker(), FakeBroker()
+    b23._price = b23c._price = b22._price
+    e23 = TestEngine(b23, FakeLogger(), df22, series(**UP_M15)); e23.cfg = {}
+    e23c = TestEngine(b23c, FakeLogger(), df22, series(**UP_M15)); e23c.cfg = {}
+    _orig_ud = _alerts.update_dead
+    _alerts.update_dead = lambda eng: None      # aisla el gate de la deteccion
+    try:
+        e23.dead = True
+        e23.on_tick(); e23c.on_tick()
+    finally:
+        _alerts.update_dead = _orig_ud
+    check("M5 dead-gate: con dead=True no abre", len(b23.orders) == 0, str(b23.orders))
+    check("M5 dead-gate: control sin dead si abre", len(b23c.orders) == 1, str(b23c.orders))
+
+    # A6 en el M5 real: equity 0 una sola vez no marca muerta; en un 2.o tick distinto, si.
+    class _TickEng(TestEngine):
+        t = 1_700_050_000
+        def _fetch_tick(self):
+            class T: pass
+            T.time = self.t
+            return T()
+    b24 = FakeBroker(balance=0.0); b24._price = b22._price
+    e24 = _TickEng(b24, FakeLogger(), df22, series(**UP_M15)); e24.cfg = {}
+    sent24 = []
+    e24.alerts = _alerts.AlertManager(FakeLogger(), "a@b.c", "x",
+                                      sender=lambda to, s, bd, lg=None: sent24.append(s))
+    e24.on_tick()
+    check("M5: equity 0 en un solo tick => no dead ni CRITICA", not e24.dead and not sent24)
+    e24.on_tick()    # mismo tick.time: no cuenta como lectura nueva
+    check("M5: el mismo tick repetido no confirma", not e24.dead and not sent24)
+    e24.t += 1
+    e24.on_tick()
+    check("M5: 2.a lectura en otro tick => dead + CRITICA",
+          e24.dead and len(sent24) == 1 and "CRITICA" in sent24[0], str(sent24))
+
     print("\n" + "=" * 60)
     if fails:
         print("FALLOS (%d): %s" % (len(fails), fails))

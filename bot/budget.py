@@ -104,8 +104,14 @@ class MarginGovernor:
         return equity * float(self._p("equity_weight"))
 
     def posture(self):
-        """Postura actual segun el margin level de la cuenta."""
+        """Postura actual segun el margin level de la cuenta.
+
+        Margen desconocido (None: MT5 sin respuesta) nunca liquida ni libera: bloquea
+        lo aditivo (NO_ADD) hasta que haya una lectura real.
+        """
         ml = self.b.margin_level()
+        if ml is None:
+            return POSTURE_NO_ADD
         flatten = float(self._p("ml_flatten"))
         no_add = float(self._p("ml_no_add"))
         if flatten > 0 and ml < flatten:
@@ -170,7 +176,8 @@ class MarginGovernor:
         posture = self.posture()
         if posture != POSTURE_NORMAL:
             ml = self.b.margin_level()
-            return self._block(f"postura {posture} (margin level {ml:.0f}%)")
+            ml_txt = "n/a" if ml is None else f"{ml:.0f}%"
+            return self._block(f"postura {posture} (margin level {ml_txt})")
 
         required = self.b.order_margin(order_type, lots)
         if required <= 0:
