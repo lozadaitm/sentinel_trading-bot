@@ -128,6 +128,8 @@ class SentinelEngine:
         self.dead = False             # cuenta muerta: salta aperturas aditivas (se libera sola)
         self._dead_last_log = 0
         self._last_so_ticket = 0
+        self._so_primed = False       # primer chequeo: solo fija el ancla, sin alertar
+        self._next_chk_err_log = 0
         self._next_so_check = 0
         self._next_idle_check = 0
         self.vol_breaker = False      # VCB activo este tick (Fork A)
@@ -997,11 +999,17 @@ class SentinelEngine:
         self._next_so_check = self.now + 60
         try:
             to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
-            deals = self.b.history_deals(to_dt - datetime.timedelta(days=3), to_dt)
+            deals = self.b.history_deals(to_dt - datetime.timedelta(days=1), to_dt)
             magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
             nuevos = [d for d in deals if d.magic == magic
                       and str(getattr(d, "comment", "") or "").startswith("[so")
                       and d.ticket > self._last_so_ticket]
+            if not self._so_primed:
+                # Tras un reinicio no se re-alerta un stop-out viejo: solo se fija el ancla.
+                self._so_primed = True
+                if nuevos:
+                    self._last_so_ticket = max(d.ticket for d in nuevos)
+                return
             if nuevos:
                 self._last_so_ticket = max(d.ticket for d in nuevos)
                 d = max(nuevos, key=lambda x: x.ticket)
@@ -1010,27 +1018,38 @@ class SentinelEngine:
                     "stop_out", "CRITICA", "stop-out ejecutado por el broker",
                     f"El broker cerro posiciones por stop-out ({len(nuevos)} deals). "
                     f"Ultimo comentario: {d.comment}. Profit: {getattr(d, 'profit', 0)}.")
-        except Exception:  # noqa: BLE001  (best-effort; nunca rompe on_tick)
-            pass
+        except Exception as e:  # noqa: BLE001  (best-effort; nunca rompe on_tick)
+            self._check_failed("stop-out", e)
 
     def _check_idle(self):
         """Una vez por hora: sin posiciones propias ni deals propios en 72 h => AVISO."""
         if self.now < self._next_idle_check:
             return
         self._next_idle_check = self.now + 3600
+        if self.close_only:   # solo bots RUNNING: uno detenido a proposito no esta "inactivo"
+            return
         try:
             if self.b.positions():
                 return
             to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
-            deals = self.b.history_deals(to_dt - datetime.timedelta(hours=74), to_dt)
+            deals = self.b.history_deals(to_dt - datetime.timedelta(hours=72), to_dt)
             magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
             if any(d.magic == magic for d in deals):
                 return
             self.alerts.notify(
                 "inactivo", "AVISO", "bot inactivo 72 h",
                 "Sin posiciones abiertas ni operaciones propias en las ultimas 72 horas.")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            self._check_failed("inactividad", e)
+
+    def _check_failed(self, what, exc):
+        """Un chequeo de alertas fallo: SYSTEM como mucho una vez por hora."""
+        if self.now >= self._next_chk_err_log:
+            self._next_chk_err_log = self.now + 3600
+            try:
+                self.log.write("SYSTEM", f"Chequeo de {what} fallo (se omite): {exc}")
+            except Exception:  # noqa: BLE001
+                pass
 
     # ==============================================================
     # ON TICK (CORE)

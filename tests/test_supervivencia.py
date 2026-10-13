@@ -6,8 +6,10 @@ Correr:  python -m tests.test_supervivencia
 import calendar
 import MetaTrader5 as mt5
 
-from bot import survival
+from bot import config, survival
 from tests.test_m5_and_budget import FakeBroker, FakeLogger, FakePos
+
+config.ALERT_EMAIL_TO = ""   # los tests nunca deben mandar correos reales (AlertManager queda no-op)
 
 BUY, SELL = mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL
 M15, M5 = 100200, 100300
@@ -327,11 +329,41 @@ def test_stop_out_alert():
     class D:
         ticket, magic, entry, profit = 77, b.magic, 1, -50.0
         comment = "[so 18.85%/13.19/69.98]"
-    b.history_deals = lambda a, c: [D()]
-    for i in range(3):
+    class D2(D):
+        ticket = 90
+    deals = [D()]
+    b.history_deals = lambda a, c: list(deals)
+    e.now = 1_700_000_000
+    e._check_stop_out()
+    check(len(sent) == 0 and e._last_so_ticket == 77, "primer chequeo solo siembra el ancla (0 alertas)")
+    deals.append(D2())
+    for i in range(1, 4):
         e.now = 1_700_000_000 + i * 61
         e._check_stop_out()
-    check(len(sent) == 1 and "stop-out" in sent[0], f"exactamente 1 alerta stop_out (got {len(sent)})")
+    check(len(sent) == 1 and "stop-out" in sent[0], f"deal nuevo => exactamente 1 alerta (got {len(sent)})")
+    check(e._last_so_ticket == 90, "ancla avanzo a 90")
+
+
+def test_idle_alert():
+    from bot import alerts
+    e, b, log = _eng()
+    sent = []
+    e.alerts = alerts.AlertManager(log, "a@b.c", "x", sender=lambda to, s, bd, lg=None: sent.append(s))
+    deals = []
+    b.history_deals = lambda a, c: list(deals)
+    e.now = 1_700_000_000
+    e.close_only = True
+    e._check_idle()
+    check(len(sent) == 0, "close_only => sin alerta de inactividad")
+    e.close_only = False
+    e.now += 3601
+    deals.append(type("D", (), {"ticket": 1, "magic": b.magic, "comment": "", "profit": 0.0})())
+    e._check_idle()
+    check(len(sent) == 0, "deal propio reciente => sin alerta")
+    e.now += 3601
+    deals.clear()
+    e._check_idle()
+    check(len(sent) == 1 and "inactivo" in sent[0], f"sin posiciones ni deals => 1 alerta (got {sent})")
 
 
 def main():
@@ -352,6 +384,7 @@ def main():
     test_alert_dedupe()
     test_dead_account_gate()
     test_stop_out_alert()
+    test_idle_alert()
     print("\ntest_supervivencia: TODO OK")
 
 

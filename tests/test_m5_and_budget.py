@@ -47,6 +47,8 @@ import MetaTrader5 as mt5
 from bot import budget, config
 from bot.strategy_m5 import M5Engine
 
+config.ALERT_EMAIL_TO = ""   # los tests nunca deben mandar correos reales (AlertManager queda no-op)
+
 
 class FakePos:
     def __init__(self, ticket, ptype, volume, price_open, ptime, comment, magic, sl=0.0):
