@@ -760,6 +760,42 @@ def test_unlock_wired_in_tick():
         _ind.get_h4_structure, _ind.check_m15_breakout = orig
 
 
+def test_unlock_buy_lock_mirror():
+    """Neto original CORTO (LOCK BUY): rebote = ref - ask."""
+    from bot import strategy
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 1, mt5.POSITION_TYPE_SELL, 0.34, 4400.0, "SMC Sell Entry")
+    _pos(b, 2, mt5.POSITION_TYPE_BUY, 0.34, 4400.0, "Basket Lock")
+    e.cycle.sync(b.positions())
+    b._price = 4460.0 - 0.25   # ask 4460: el precio siguio subiendo (continuacion)
+    e._maybe_unlock()
+    check(not b.partials and _lock_vol(e, b) == 0.34, f"ask 4460 (LOCK BUY gana): nada (got {b.partials})")
+    b._price = 4349.0 - 0.25   # ask 4349: rebote +51 a favor del corto
+    e._maybe_unlock()
+    check(len(b.partials) == 1 and abs(b.partials[0]["lots"] - 0.14) < 1e-9,
+          f"ask 4349 => se cierran 0.14 (got {b.partials})")
+    check(e.cycle.get_meta("unlock_ref_price") == 4349.0, "unlock_ref_price = ask 4349")
+    check(e._lock_state(b.positions()) == strategy.LOCK_LOOSE, "estado AFLOJADO")
+
+
+def test_relock_resets_unlock_ref():
+    """R13: tras recongelar, el rebote se mide desde el precio del NUEVO candado."""
+    e, b, log = _unlock_setup(4451.0)
+    e._maybe_unlock()
+    check(e.cycle.get_meta("unlock_ref_price") == 4451.0, "aflojado a 4451")
+    b._price = 4300.0
+    b._equity = 2000.0          # S = 2000/(0.14*100) = 143 < 150 => recongela
+    e._maybe_lock()
+    check(b.orders and b.orders[-1]["comment"] == "Basket Lock"
+          and abs(b.orders[-1]["lots"] - 0.14) < 1e-9, f"recandado 0.14 SELL (got {b.orders})")
+    check(e.cycle.get_meta("unlock_ref_price") == 4300.0, "ref = precio del nuevo candado (4300)")
+    b._equity = 5000.0
+    b._price = 4350.0
+    e._maybe_unlock()
+    check(abs(_lock_vol(e, b) - 0.20) < 1e-9 and e.cycle.get_meta("unlock_ref_price") == 4350.0,
+          f"rebote +50 desde 4300 afloja 0.14 (no hace falta 4501) (LOCK {_lock_vol(e, b)})")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -796,6 +832,8 @@ def main():
     test_successive_unlock_needs_new_rebound()
     test_unlock_newest_first()
     test_unlock_wired_in_tick()
+    test_unlock_buy_lock_mirror()
+    test_relock_resets_unlock_ref()
     print("\ntest_supervivencia: TODO OK")
 
 

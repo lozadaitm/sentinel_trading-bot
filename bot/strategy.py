@@ -20,6 +20,7 @@ de tiempo, consistente con position.time.
 """
 
 import datetime
+import math
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -478,6 +479,13 @@ class SentinelEngine:
                 break
             locked = round(locked + vol, 8)
             remaining = round(remaining - vol, 8)
+            # R13: tras (re)poner el candado, el rebote se mide desde el precio de
+            # ESTE candado (en un candado partido, la ultima pata confirmada).
+            ticket = getattr(res, "order", 0)
+            fill = next((p.price_open for p in self.b.positions() if p.ticket == ticket), None)
+            if fill is None:
+                fill = self.b.bid() if otype == mt5.ORDER_TYPE_SELL else self.b.ask()
+            self.cycle.set_meta("unlock_ref_price", float(fill))
 
         if locked > 0:
             if self.cycle.get_meta("lock_since") is None:
@@ -543,20 +551,26 @@ class SentinelEngine:
             return
 
         # 4. Volumen: el mayor v que deja S >= survival_move_usd y el neto propio en cupo.
-        import math
+        # S cae y |neto propio| crece de forma monotona con v: busqueda binaria
+        # sobre k (acota las llamadas a MT5 por tick).
         target = float(self._p("survival_move_usd"))
         cap = float(self._p("equity_weight")) * self.surv.n_max()
         own = survival.net_lots(positions)
         vmin = self.b.volume_min()
-        v = 0.0
-        k = int(math.floor(total / step + 1e-9))
-        while k > 0:
+
+        def fits(k):
             cand = round(k * step, 8)
-            if (self.surv.s_with_delta(dir_orig * cand, 0.0) >= target - 1e-9
-                    and abs(own + dir_orig * cand) <= cap + 1e-9):
-                v = cand
-                break
-            k -= 1
+            return (self.surv.s_with_delta(dir_orig * cand, 0.0) >= target - 1e-9
+                    and abs(own + dir_orig * cand) <= cap + 1e-9)
+
+        lo, hi = 0, int(math.floor(total / step + 1e-9))   # invariante: fits(lo) o lo == 0
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        v = round(lo * step, 8)
         if v < vmin - 1e-9:
             return
 
