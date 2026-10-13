@@ -71,6 +71,7 @@ class FakeBroker:
         self.partials = []
         self.ml = float("inf")
         self._free = 9000.0
+        self._margin = 0.0
     # specs
     def point(self): return 0.01
     def digits(self): return 2
@@ -86,6 +87,8 @@ class FakeBroker:
     def account_balance(self): return self._balance
     def account_equity(self): return self._balance
     def margin_free(self): return self._free
+    def account_margin(self): return self._margin
+    def contract_size(self): return 100.0
     def margin_level(self): return self.ml
     def stop_out_levels(self): return (100.0, 50.0)
     def hedged_margin_rate(self): return (0.0, False)

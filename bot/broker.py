@@ -95,6 +95,16 @@ class Broker:
         info = mt5.account_info()
         return info.margin_free if info else 0.0
 
+    def account_margin(self):
+        """Margen usado por la cuenta (todas las posiciones). 0.0 si MT5 no responde."""
+        info = mt5.account_info()
+        return info.margin if info else 0.0
+
+    def contract_size(self):
+        """Tamaño del contrato (onzas por lote). 100.0 si MT5 no responde."""
+        info = mt5.symbol_info(self.symbol)
+        return float(info.trade_contract_size) if info else 100.0
+
     # --------------------------------------------------------------
     # Posiciones
     # --------------------------------------------------------------
