@@ -77,8 +77,8 @@ UPDATE public.bot_config
 --   SELECT user_id, bot_id, margin_cap_pct, ml_no_add, ml_flatten, inp_max_spread
 --     FROM public.bot_config;
 --
--- Para revertir: descomenta y ejecuta lo siguiente, completando los valores
--- previos con la salida guardada.
+-- Para revertir: descomenta y ejecuta lo siguiente.
+-- Las columnas nuevas se conservan a proposito (el codigo viejo las ignora).
 --
 -- UPDATE public.bot_config
 --    SET max_net_lots      = 1,
@@ -87,13 +87,19 @@ UPDATE public.bot_config
 --        m5_max_lot_cap    = 0.5,
 --        news_enforce      = false;
 --
--- -- Fila m5 que tenia 10 / 400 / 250 (margin_cap_pct / ml_no_add / ml_flatten):
+-- ATENCION: los dos UPDATE siguientes DEBEN restringirse a la UNICA fila
+-- identificada en el SELECT guardado en local (solo una fila de cada bot tenia
+-- esos valores). Sin el filtro por user_id se aplicarian a TODAS las filas.
+--
+-- -- La fila m5 que tenia 10 / 400 / 250 (margin_cap_pct / ml_no_add / ml_flatten):
 -- UPDATE public.bot_config
 --    SET margin_cap_pct = 10, ml_no_add = 400, ml_flatten = 250
---  WHERE bot_id = 'm5';
+--  WHERE bot_id = 'm5'
+--    AND user_id = '<UUID de la fila, tomado del SELECT guardado>';
 --
--- -- Fila m15 que tenia inp_max_spread 300 (restaura tambien sus margin_cap_pct /
--- -- ml_no_add / ml_flatten previos, tomados del SELECT guardado en local):
+-- -- La fila m15 que tenia inp_max_spread 300. Sus margin_cap_pct / ml_no_add /
+-- -- ml_flatten ya eran 60 / 200 / 0 (iguales a los nuevos): no requieren cambio.
 -- UPDATE public.bot_config
 --    SET inp_max_spread = 300
---  WHERE bot_id = 'm15';
+--  WHERE bot_id = 'm15'
+--    AND user_id = '<UUID de la fila, tomado del SELECT guardado>';
