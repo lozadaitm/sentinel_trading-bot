@@ -24,7 +24,7 @@ import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators, ledger, news, survival
+from . import alerts, budget, config, indicators, ledger, news, survival
 
 # Defaults = valores input del MQL5 (fallback si falta la columna en bot_config)
 DEFAULTS = {
@@ -124,6 +124,12 @@ class SentinelEngine:
         self.user_email = None         # email del usuario (auth.users) para identificar la instancia en la UI
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
         self._last_additive_sent = False  # _open_additive llego a enviar orden
+        self.alerts = alerts.make_manager(logger)
+        self.dead = False             # cuenta muerta: salta aperturas aditivas (se libera sola)
+        self._dead_last_log = 0
+        self._last_so_ticket = 0
+        self._next_so_check = 0
+        self._next_idle_check = 0
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -418,6 +424,8 @@ class SentinelEngine:
         Devuelve True solo si la apertura quedo confirmada y registrada.
         """
         self._last_additive_sent = False
+        if self.dead:
+            return False
         lots = self.surv.fit(order_type, lots, label)
         if lots <= 0:
             return False
@@ -982,6 +990,48 @@ class SentinelEngine:
     def _server_dt(self):
         return datetime.datetime.utcfromtimestamp(self.now)
 
+    def _check_stop_out(self):
+        """Una vez por minuto: deal propio de stop-out ('[so...') nuevo => alerta CRITICA."""
+        if self.now < self._next_so_check:
+            return
+        self._next_so_check = self.now + 60
+        try:
+            to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
+            deals = self.b.history_deals(to_dt - datetime.timedelta(days=3), to_dt)
+            magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
+            nuevos = [d for d in deals if d.magic == magic
+                      and str(getattr(d, "comment", "") or "").startswith("[so")
+                      and d.ticket > self._last_so_ticket]
+            if nuevos:
+                self._last_so_ticket = max(d.ticket for d in nuevos)
+                d = max(nuevos, key=lambda x: x.ticket)
+                self.log.write("ERROR", f"STOP-OUT del broker detectado: {d.comment}")
+                self.alerts.notify(
+                    "stop_out", "CRITICA", "stop-out ejecutado por el broker",
+                    f"El broker cerro posiciones por stop-out ({len(nuevos)} deals). "
+                    f"Ultimo comentario: {d.comment}. Profit: {getattr(d, 'profit', 0)}.")
+        except Exception:  # noqa: BLE001  (best-effort; nunca rompe on_tick)
+            pass
+
+    def _check_idle(self):
+        """Una vez por hora: sin posiciones propias ni deals propios en 72 h => AVISO."""
+        if self.now < self._next_idle_check:
+            return
+        self._next_idle_check = self.now + 3600
+        try:
+            if self.b.positions():
+                return
+            to_dt = datetime.datetime.now() + datetime.timedelta(days=2)
+            deals = self.b.history_deals(to_dt - datetime.timedelta(hours=74), to_dt)
+            magic = getattr(self.b, "magic", config.MAGIC_NUMBER)
+            if any(d.magic == magic for d in deals):
+                return
+            self.alerts.notify(
+                "inactivo", "AVISO", "bot inactivo 72 h",
+                "Sin posiciones abiertas ni operaciones propias en las ultimas 72 horas.")
+        except Exception:  # noqa: BLE001
+            pass
+
     # ==============================================================
     # ON TICK (CORE)
     # ==============================================================
@@ -989,6 +1039,10 @@ class SentinelEngine:
         if not self._compute_buffers():
             self.hud = {"status": "Esperando datos de MT5 (warmup de indicadores)..."}
             return
+
+        alerts.update_dead(self)
+        self._check_stop_out()
+        self._check_idle()
 
         struct_h4 = indicators.get_h4_structure(self.df_h4, self._p("use_h4_struct"))
         signal_m15 = indicators.check_m15_breakout(self.df_m15)

@@ -142,6 +142,11 @@ def setup(logger=None, engine_cls=None):
     if not allowed:
         logger.write("ERROR", f"APERTURAS BLOQUEADAS: {motivo}",
                      balance=broker.account_balance())
+    try:
+        rate, use_leg = broker.hedged_margin_rate()
+        logger.write("SYSTEM", f"margin_hedged del simbolo: {rate} (use_leg={use_leg})")
+    except Exception as e:  # noqa: BLE001
+        logger.write("SYSTEM", f"margin_hedged del simbolo no disponible: {e}")
     if config.SHADOW_MODE:
         logger.write("SYSTEM", "MODO SOMBRA activo: no se enviaran ordenes reales; solo se loguean decisiones.")
 

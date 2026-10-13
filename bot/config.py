@@ -169,6 +169,8 @@ def mt5_init_kwargs():
 # ==================================================================
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM = os.environ.get("RESEND_FROM", "Sentinel <onboarding@resend.dev>")
+# Destinatario de las alertas operativas (bot/alerts.py). Vacio => alertas desactivadas.
+ALERT_EMAIL_TO = os.environ.get("ALERT_EMAIL_TO", "")
 # URL publica del dashboard (CTA de los correos).
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://sentinel-trading-webapp.vercel.app/")
 

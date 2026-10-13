@@ -58,7 +58,7 @@ import math
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators, news, survival
+from . import alerts, budget, config, indicators, news, survival
 
 # Defaults = valores input del MQL5 original (fallback si falta en bot_config).
 DEFAULTS = {
@@ -160,6 +160,9 @@ class M5Engine:
         self.vol_breaker = False
         self.vol_breaker_prev = False
         self.spread_high = False
+        self.alerts = alerts.make_manager(logger)
+        self.dead = False             # cuenta muerta: salta aperturas (se libera sola)
+        self._dead_last_log = 0
 
         # Buffers del tick (vela CERRADA salvo donde se indique)
         self.now = 0
@@ -636,6 +639,8 @@ class M5Engine:
             self.hud = {"status": "Esperando datos de MT5 (warmup de indicadores)..."}
             return
 
+        alerts.update_dead(self)
+
         # 1. Gestion de lo abierto SIEMPRE primero, y nunca condicionada por
         #    spread, VCB ni presupuesto: cerrar y proteger no añade riesgo.
         self._manage_exits()
@@ -773,6 +778,8 @@ class M5Engine:
             return
 
         # --- EJECUCION con SL dinamico por ATR ---
+        if self.dead:
+            return
         lots = self._calculate_lots()
         order_type = mt5.ORDER_TYPE_BUY if signal_buy else mt5.ORDER_TYPE_SELL
         lots = self.surv.fit(order_type, lots, "Scalp M5")

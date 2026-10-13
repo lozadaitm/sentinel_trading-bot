@@ -280,6 +280,60 @@ def test_risk_hours_block_recovery_and_rescue():
     check(len(b.orders) == 1, "fuera de hora de riesgo el rescate si abre")
 
 
+def test_alert_dedupe():
+    from bot import alerts
+    sent, t = [], [1000.0]
+    m = alerts.AlertManager(FakeLogger(), "a@b.c", "123/m15",
+                            sender=lambda to, s, b, lg=None: sent.append((to, s)), clock=lambda: t[0])
+    check(m.notify("x", "AVISO", "hola", "cuerpo") is True, "primer envio True")
+    t[0] += 3600
+    check(m.notify("x", "AVISO", "hola", "cuerpo") is False and len(sent) == 1, "dentro de 1 h => dedupe")
+    t[0] += 6 * 3600 + 1
+    m.notify("x", "AVISO", "hola", "cuerpo")
+    check(len(sent) == 2, "pasado el cooldown => 2 envios")
+    check(sent[0][1] == "[Sentinel AVISO] 123/m15: hola", f"asunto (got {sent[0][1]})")
+    log = FakeLogger()
+    m2 = alerts.AlertManager(log, "", "x", sender=lambda *a, **k: sent.append(1))
+    m2.notify("k", "AVISO", "s", "b"); m2.notify("k", "AVISO", "s", "b")
+    check(len(sent) == 2 and sum(1 for t_, _ in log.events if t_ == "SYSTEM") == 1,
+          "sin destinatario: no envia y un solo log SYSTEM")
+
+
+def test_dead_account_gate():
+    from bot import alerts, ledger
+    e, b, log = _eng(equity=0.0)
+    sent = []
+    e.alerts = alerts.AlertManager(log, "a@b.c", "x", sender=lambda to, s, bd, lg=None: sent.append(s))
+    for i in range(3):
+        e.now = 1_700_000_000 + i
+        alerts.update_dead(e)
+    ok = e._open_additive(BUY, 0.10, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    errs = [m for t_, m in log.events if t_ == "ERROR"]
+    check(e.dead and not ok and not b.orders, "equity 0 => dead y no abre")
+    check(len(errs) == 1 and len(sent) == 1, f"un solo ERROR y un correo en 3 ticks (got {len(errs)}/{len(sent)})")
+    b._equity = 5000.0
+    e.now += 5
+    alerts.update_dead(e)
+    ok = e._open_additive(BUY, 0.10, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
+    check(not e.dead and ok and len(b.orders) == 1, "equity 5000 => se libera y abre")
+
+
+def test_stop_out_alert():
+    from bot import alerts
+    e, b, log = _eng()
+    sent = []
+    e.alerts = alerts.AlertManager(log, "a@b.c", "x", sender=lambda to, s, bd, lg=None: sent.append(s))
+
+    class D:
+        ticket, magic, entry, profit = 77, b.magic, 1, -50.0
+        comment = "[so 18.85%/13.19/69.98]"
+    b.history_deals = lambda a, c: [D()]
+    for i in range(3):
+        e.now = 1_700_000_000 + i * 61
+        e._check_stop_out()
+    check(len(sent) == 1 and "stop-out" in sent[0], f"exactamente 1 alerta stop_out (got {len(sent)})")
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -295,6 +349,9 @@ def main():
     test_rescue_churn_capped()
     test_unwind_respects_survival()
     test_risk_hours_block_recovery_and_rescue()
+    test_alert_dedupe()
+    test_dead_account_gate()
+    test_stop_out_alert()
     print("\ntest_supervivencia: TODO OK")
 
 

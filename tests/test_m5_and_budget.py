@@ -123,6 +123,7 @@ class FakeBroker:
         return R()
     def modify_sl(self, p, sl): p.sl = float(sl); return None
     def history_deals(self, a, b): return []
+    def trade_allowed(self): return (True, "")
 
 
 def series(n, start, drift, noise=0.0, seed=1, pull=None, pn=0):
