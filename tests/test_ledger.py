@@ -179,14 +179,19 @@ def test_lock_role():
     lg2 = CycleLedger(path=None)
     solo = [pos(94, SELL, "Basket Lock", t=1)]
     r2 = lg2.sync(solo)
-    check(r2[94] == ROLE_LOCK and lg2.entry_pos(solo) is None, "LOCK solitario no se promueve")
-    check(lg2.cycle_legs(solo) == [], "LOCK solitario no es leg de ciclo")
-    # Un hedge desconocido no toma un LOCK como candidato de par
+    check(r2[94] == ROLE_ENTRY and lg2.entry_pos(solo).ticket == 94,
+          "LOCK sin ciclo vivo -> ORPHAN -> promovido a ENTRY")
+    # LOCK sin ciclo + hedge desconocido: el LOCK degrada a ORPHAN y el hedge lo
+    # cubre (par huerfano congelado); al estar cubierto no se promueve a ENTRY.
     lg3 = CycleLedger(path=None)
     mix = [pos(95, BUY, "Basket Lock", t=1), pos(96, SELL, "Hedge Lock", t=2)]
     r3 = lg3.sync(mix)
-    check(r3[95] == ROLE_LOCK and lg3.pairs(mix) == [] and lg3.rec[96]["covers"] is None,
-          "hedge desconocido no toma un LOCK como par")
+    check(r3[95] == ROLE_ORPHAN and r3[96] == ROLE_HEDGE and lg3.rec[96]["covers"] == 95,
+          "LOCK degradado ORPHAN cubierto por el hedge desconocido")
+    # Con ciclo vivo el LOCK conserva su rol
+    lg4 = CycleLedger(path=None)
+    r4 = lg4.sync([pos(97, BUY, "SMC Buy Entry", t=1), pos(98, SELL, "Basket Lock", t=2)])
+    check(r4[98] == ROLE_LOCK, "con ciclo vivo el LOCK sigue LOCK")
 
 
 def test_meta_persists():

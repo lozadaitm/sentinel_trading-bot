@@ -163,6 +163,17 @@ class CycleLedger:
                 self._log_write("LEDGER", "ENTRY duplicada adoptada como RECOVERY.", ticket=p.ticket)
             self.rec[p.ticket] = {"role": role, "covers": None}
             changed = True
+        # 2b. Candado sin ciclo vivo (ningun ENTRY/RECOVERY/RESCUE): es exposicion
+        #     direccional desnuda, no un candado -> ORPHAN, antes de emparejar hedges.
+        if not any(r["role"] in (ROLE_ENTRY, ROLE_RECOVERY, ROLE_RESCUE)
+                   for t, r in self.rec.items() if t in live):
+            for t, r in self.rec.items():
+                if r["role"] == ROLE_LOCK and t in live:
+                    r["role"] = ROLE_ORPHAN
+                    r["covers"] = None
+                    changed = True
+                    self._log_write("LEDGER", "Candado sin ciclo vivo: degradado a ORPHAN "
+                                    "(queda vigilado como pata desnuda).", ticket=t)
         for p in (q for q in unknown if role_from_comment(q.comment) == ROLE_HEDGE):
             target = self._pair_candidate(p, live)
             self.rec[p.ticket] = {
