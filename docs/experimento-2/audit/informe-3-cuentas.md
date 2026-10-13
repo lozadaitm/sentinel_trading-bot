@@ -85,6 +85,34 @@ desfasada y solo se resincroniza cuando todas coinciden planas.
 | D9 | **ALTA (operativa)** | `mt5.initialize()` desde un proceso nuevo falla con `-6 Authorization failed` en los 3 terminales vivos, aunque los bots ya conectados siguen funcionando. Si un `restart_all` reproduce el fallo, los bots no reconectarían. | **No explicada.** Mismo build (5.0.6090) en paquete y terminal, misma sesión y usuario. |
 | D10 | INFO | La cuenta 34087418 es **LIVE** (no demo) y está apagada. | Provisionada el 13-ago, nunca arrancó. |
 
+## Verificación con los reportes MT5 (ReportHistory HTML, 2026-10-13)
+
+El usuario exportó a mano los `ReportHistory-<cuenta>.html`, parseados a
+`mt5_{deals,orders,positions}_<cuenta>.csv` (locales). Su cobertura es parcial:
+25556247 del 11-jun al 21-ago, 25912766 del 17-ago al 1-sep y 25924397 solo del 7 al 11-sep.
+**Vantage eliminó las 3 cuentas demo** (el usuario ya no puede recargarlas).
+
+| Cuenta | Neto de trading en el reporte | Stop-outs (`[so …]`, hora UTC = servidor −3 h) |
+|---|---|---|
+| 25556247 (base) | −15 748 $ (incluye resets de balance de junio–agosto) | 21-ago 08:23–08:24: 2 SELL (0,40 + 0,44) → −12 293 $ |
+| 25912766 | −5 449 $ | 19-ago 01:02: 4 BUY de 0,19–0,20 → −4 742 $. 19-ago 14:31: SELL 0,08 → −898 $. 1-sep 12:38: 5 legs → −38,73 $ |
+| 25924397 | +2 549 $ (solo 7–11 sep) | ninguno |
+
+Los `[sl …]` de los reportes son los SL del M5 (0,01–0,04 lotes), por diseño.
+
+**Causa raíz de D1, precisada con los deals:**
+
+- **25912766:** la cesta murió con 4 patas BUY de recovery/rescate (0,19–0,20 c/u) **sin cobertura**.
+  El oro cayó de 4 367 a 4 325 en la noche asiática y el broker liquidó la cuenta.
+- **Base:** el 19-ago entre 15:57 y 16:11 UTC hubo un **churn de OP4**: 14 veces seguidas se abre
+  "Sentinel Op 4" SELL 0,44 y el Unwind la banca entre 3 y 100 s después. Al terminar quedaron
+  solo la Recovery Sell (0,44, amputada a 0,40) y la última OP4 SELL 0,44, **sin hedge**. Así
+  estuvieron ~43 h mientras el oro subía de 4 442 a 4 577, hasta el stop-out.
+- **Patrón común:** las patas de recovery/rescate no tienen cobertura propia ni stop (restricción
+  de diseño, [[bot-design-constraints]]). Cuando el precio no vuelve, una pata desnuda quema la
+  cuenta. El churn OP4↔Unwind es el patrón de [[unwind-orphans-hedge-count-state]] y sigue vivo
+  pese al CycleLedger.
+
 ## Lo que NO se pudo verificar
 
 - Precios exactos de los deals de cierre y comisiones/swap por deal (requiere el historial MT5, D9).
