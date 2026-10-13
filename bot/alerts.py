@@ -1,5 +1,6 @@
 """Alertas por correo con dedupe y deteccion de cuenta muerta. Best-effort: nunca tumba el motor."""
 
+import inspect
 import time
 
 from . import config, notify
@@ -23,6 +24,10 @@ class AlertManager:
         self._last = {}
         self._retry_at = {}
         self._warned_no_to = False
+        try:   # solo el sender real (send_async) acepta el callback de fallo
+            self._sender_has_on_fail = "on_fail" in inspect.signature(sender).parameters
+        except (TypeError, ValueError):
+            self._sender_has_on_fail = False
 
     def notify(self, kind, severity, subject, body):
         """True si envio; False si dedupe, sin destinatario o fallo del sender.
@@ -30,8 +35,9 @@ class AlertManager:
         Un envio fallido (excepcion o sender que devuelve False) NO consume la espera
         del dedupe: se restaura el `_last` previo para poder reintentar (tras una
         pausa corta, para no martillar en cada tick). El sender real (send_async)
-        manda en un hilo y devuelve None: sus fallos HTTP ocurren fuera y no se ven
-        aqui; solo se detecta una excepcion sincrona o un False explicito.
+        manda en un hilo y devuelve None: sus fallos (HTTP, timeout, sin API key o
+        sin destinatario) los avisa llamando a `on_fail` desde ese hilo; el callback
+        solo asigna en dos dicts (sin tocar el logger).
         """
         if not self.to_addr:
             if not self._warned_no_to:
@@ -45,18 +51,27 @@ class AlertManager:
         if now < self._retry_at.get(kind, 0.0):
             return False   # reintento tras fallo: aun en pausa corta
         self._last[kind] = now
+        failed = [False]
+
+        def restore():
+            # No consume la espera: restaura el estado previo y pausa el reintento.
+            # Idempotente y apta para el hilo del sender (solo asignaciones a dict).
+            if self._last.get(kind) == now:
+                if last is None:
+                    self._last.pop(kind, None)
+                else:
+                    self._last[kind] = last
+            self._retry_at[kind] = now + RETRY_AFTER_FAIL_S
+            failed[0] = True
+
+        kw = {"on_fail": restore} if self._sender_has_on_fail else {}
         try:
-            ok = self.sender(self.to_addr, f"[Sentinel {severity}] {self.label}: {subject}", body, self.log)
+            ok = self.sender(self.to_addr, f"[Sentinel {severity}] {self.label}: {subject}", body, self.log, **kw)
         except Exception as e:  # noqa: BLE001
             self.log.write("ERROR", f"Fallo al enviar alerta '{kind}': {e}")
             ok = False
-        if ok is False:
-            # No consume la espera: restaura el estado previo para reintentar.
-            if last is None:
-                self._last.pop(kind, None)
-            else:
-                self._last[kind] = last
-            self._retry_at[kind] = now + RETRY_AFTER_FAIL_S
+        if ok is False or failed[0]:
+            restore()
             return False
         self._retry_at.pop(kind, None)
         return True

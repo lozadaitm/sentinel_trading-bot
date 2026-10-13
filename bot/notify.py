@@ -30,7 +30,16 @@ def is_configured():
     return bool(config.RESEND_API_KEY)
 
 
-def _send(to_addr, subject, body, logger=None, html=None):
+def _failed(on_fail):
+    """Avisa al llamador (AlertManager) de que el envio fallo. Best-effort."""
+    if on_fail is not None:
+        try:
+            on_fail()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _send(to_addr, subject, body, logger=None, html=None, on_fail=None):
     data = {
         "from": config.RESEND_FROM,
         "to": [to_addr],
@@ -64,23 +73,32 @@ def _send(to_addr, subject, body, logger=None, html=None):
             detail = ""
         if logger:
             logger.write("ERROR", f"Resend rechazo el email a {to_addr} ({e.code}): {detail}")
+        _failed(on_fail)
     except Exception as e:  # noqa: BLE001  (best-effort; el evento ya quedo en DB)
         if logger:
             logger.write("ERROR", f"Fallo el envio de email a {to_addr}: {e}")
+        _failed(on_fail)
 
 
-def send_async(to_addr, subject, body, logger=None, html=None):
-    """Envia el correo en un hilo daemon. No-op (con log) si falta config o destinatario."""
+def send_async(to_addr, subject, body, logger=None, html=None, on_fail=None):
+    """Envia el correo en un hilo daemon. No-op (con log) si falta config o destinatario.
+
+    `on_fail` (opcional): callable sin argumentos que se invoca ante CUALQUIER fallo
+    (sin destinatario, sin API key, HTTP, timeout), desde el hilo del envio o, en los
+    no-op, desde el llamador. Sin el, el comportamiento es el de siempre.
+    """
     if not to_addr:
         if logger:
             logger.write("ERROR", "Email de objetivo NO enviado: sin destinatario (auth.users).")
+        _failed(on_fail)
         return
     if not is_configured():
         if logger:
             logger.write("SYSTEM", f"RESEND_API_KEY sin configurar: se omite el email a {to_addr} ({subject}).")
+        _failed(on_fail)
         return
     threading.Thread(
-        target=_send, args=(to_addr, subject, body, logger, html),
+        target=_send, args=(to_addr, subject, body, logger, html, on_fail),
         name="mail-sender", daemon=True,
     ).start()
 

@@ -520,10 +520,11 @@ class M5Engine:
     def _deal_window_end(self):
         """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min.
 
-        Sin tick todavia (now == 0) cae al reloj local: la ventana es ancha y no importa el desfase.
+        Sin tick todavia (now == 0) cae al reloj local + 1 dia: con ese margen la ventana
+        contiene la hora de servidor sea cual sea el desfase de zona.
         """
         if not self.now:
-            return datetime.datetime.now() + datetime.timedelta(minutes=5)
+            return datetime.datetime.now() + datetime.timedelta(days=1)
         return self._server_dt() + datetime.timedelta(minutes=5)
 
     # ==============================================================

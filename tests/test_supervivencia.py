@@ -1493,7 +1493,17 @@ def test_history_windows_use_server_time():
     b.history_deals = lambda a, c: (calls.append((a, c)), [])[1]
     e._fetch_tick = lambda: None
     e.init_history_cursor()
-    check(len(calls) == 1 and calls[0][1].year >= 2024, "sin tick: fallback al reloj local, sin excepcion")
+    import datetime as _dt2
+    before = _dt2.datetime.now()
+    e._fetch_tick = lambda: None
+    e.init_history_cursor()
+    after = _dt2.datetime.now()
+    f, t = calls[-1]
+    check(len(calls) == 2 and before + _dt2.timedelta(days=1) <= t <= after + _dt2.timedelta(days=1)
+          and t - f == _dt2.timedelta(days=7),
+          f"sin tick: fin de ventana = reloj local + 1 dia, 7 dias de ancho (got {f}..{t})")
+    check(t > _dt2.datetime.utcnow() + _dt2.timedelta(hours=14),
+          "el fin de ventana cubre cualquier desfase de zona (UTC+14 max)")
     # M5
     b5 = SurvBroker(magic=M5)
     calls5 = []
@@ -1511,10 +1521,63 @@ def test_history_windows_use_server_time():
           "M5 _refresh_last_trade_result: ventana termina en now servidor + 5 min")
 
 
+def test_alert_on_fail_callback():
+    """A5 con el sender real: fallos asincronos avisan via on_fail y no consumen la espera."""
+    from bot import alerts, notify
+    t, calls, mode = [1000.0], [], ["fail"]
+
+    def sender(to, s, b, lg=None, on_fail=None):
+        calls.append(s)
+        if mode[0] == "fail":
+            on_fail()          # como send_async: aviso de fallo, devuelve None
+        return None
+
+    m = alerts.AlertManager(FakeLogger(), "a@b.c", "x", sender=sender, clock=lambda: t[0])
+    check(m._sender_has_on_fail, "el manager detecta que el sender acepta on_fail")
+    check(m.notify("k", "AVISO", "s", "b") is False and "k" not in m._last, "on_fail => False y sin consumir la espera")
+    check(m.notify("k", "AVISO", "s", "b") is False and len(calls) == 1, "pausa de 60 s tras el fallo")
+    t[0] += alerts.RETRY_AFTER_FAIL_S + 1
+    mode[0] = "ok"
+    check(m.notify("k", "AVISO", "s", "b") is True and len(calls) == 2, "pasada la pausa reintenta y envia")
+    check(m.notify("k", "AVISO", "s", "b") is False and len(calls) == 2, "tras el exito aplica el dedupe")
+    # Fallo tardio (hilo) tras un exito previo: restaura el _last anterior.
+    late = []
+    def sender2(to, s, b, lg=None, on_fail=None):
+        late.append(on_fail)
+    m2 = alerts.AlertManager(FakeLogger(), "a@b.c", "x", sender=sender2, clock=lambda: t[0])
+    check(m2.notify("k", "AVISO", "s", "b") is True and "k" in m2._last, "envio lanzado => True")
+    late[0]()     # el hilo informa del fallo despues
+    check("k" not in m2._last and m2._retry_at["k"] > t[0], "fallo tardio libera la espera y pausa")
+    # Sender sin on_fail (fakes simples): sin kwarg extra.
+    m3 = alerts.AlertManager(FakeLogger(), "a@b.c", "x", sender=lambda to, s, b, lg=None: None, clock=lambda: t[0])
+    check(not m3._sender_has_on_fail and m3.notify("k", "AVISO", "s", "b") is True, "sender sin on_fail sigue igual")
+    # send_async real: sin destinatario / sin API key llama a on_fail (nunca envia).
+    orig_key = config.RESEND_API_KEY
+    try:
+        config.RESEND_API_KEY = ""
+        got = []
+        notify.send_async("", "s", "b", FakeLogger(), on_fail=lambda: got.append("no_to"))
+        notify.send_async("a@b.c", "s", "b", FakeLogger(), on_fail=lambda: got.append("no_key"))
+        notify.send_async("a@b.c", "s", "b", FakeLogger())   # sin on_fail: igual que siempre
+        check(got == ["no_to", "no_key"], f"send_async no-op avisa on_fail (got {got})")
+        # _send con fallo de red (urlopen falla): on_fail desde el propio cuerpo del envio.
+        orig_open, config.RESEND_API_KEY = notify.urllib.request.urlopen, "k"
+        def boom(*a, **k): raise OSError("sin red")
+        notify.urllib.request.urlopen = boom
+        try:
+            notify._send("a@b.c", "s", "b", FakeLogger(), on_fail=lambda: got.append("net"))
+        finally:
+            notify.urllib.request.urlopen = orig_open
+        check(got[-1] == "net", "_send con excepcion de red avisa on_fail")
+    finally:
+        config.RESEND_API_KEY = orig_key
+
+
 LOTE1 = [
     test_margin_level_unknown_is_none,
     test_budget_ml_unknown_blocks_additive,
     test_alert_send_failure_allows_retry,
+    test_alert_on_fail_callback,
     test_zero_equity_needs_two_ticks,
     test_history_windows_use_server_time,
 ]
