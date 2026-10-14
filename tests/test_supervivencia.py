@@ -376,6 +376,12 @@ def test_idle_alert():
     check(len(sent) == 0, "close_only => sin alerta de inactividad")
     e.close_only = False
     e.now += 3601
+    e._check_idle()
+    check(len(sent) == 0 and not calls, "recien encendido (cuenta nueva, sin deals) => sin alerta ni consulta")
+    e.now += 71 * 3600
+    e._check_idle()
+    check(len(sent) == 0, "71 h encendido sin deals => aun sin alerta")
+    e.now += 3601
     deals.append(type("D", (), {"ticket": 1, "magic": b.magic, "comment": "", "profit": 0.0})())
     e._check_idle()
     check(len(sent) == 0, "deal propio reciente => sin alerta")
@@ -386,6 +392,15 @@ def test_idle_alert():
     f, t = calls[-1]
     check(t - f == _dt.timedelta(hours=72) and f <= e._server_dt() <= t, "ventana idle: 72 h y contiene 'ahora' servidor")
     check(len(sent) == 1 and "inactivo" in sent[0], f"sin posiciones ni deals => 1 alerta (got {sent})")
+    e.close_only = True
+    e.now += 3601
+    e._check_idle()
+    e.close_only = False
+    e.now += 3601
+    e._check_idle()
+    e.now += 7 * 3600
+    e._check_idle()
+    check(len(sent) == 1, "apagado y re-encendido: las 72 h vuelven a contar desde el encendido")
 
 
 # ----------------------------------------------------------------------

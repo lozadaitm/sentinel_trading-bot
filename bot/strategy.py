@@ -140,6 +140,7 @@ class SentinelEngine:
         self._next_chk_err_log = 0
         self._next_so_check = 0
         self._next_idle_check = 0
+        self._idle_ref = None         # desde cuando cuenta la inactividad (arranque/encendido)
         self.lock_state = LOCK_FREE   # estado del candado de cesta en el tick (spec §5.3)
         self._lock_fail_next_log = 0  # throttle del ERROR de candado fallido
         self._lock_sl_err_next = 0    # throttle del ERROR de SL no limpiado con candado
@@ -1717,11 +1718,20 @@ class SentinelEngine:
             self._check_failed("stop-out", e)
 
     def _check_idle(self):
-        """Una vez por hora: sin posiciones propias ni deals propios en 72 h => AVISO."""
+        """Una vez por hora: sin posiciones propias ni deals propios en 72 h => AVISO.
+
+        Las 72 h se cuentan tambien desde que el bot esta RUNNING (_idle_ref): una
+        cuenta recien creada o recien encendida no tiene deals y no debe avisar
+        hasta llevar de verdad 72 h sin operar (falso aviso del 2026-10-14)."""
         if self.now < self._next_idle_check:
             return
         self._next_idle_check = self.now + 3600
         if self.close_only:   # solo bots RUNNING: uno detenido a proposito no esta "inactivo"
+            self._idle_ref = None
+            return
+        if self._idle_ref is None:
+            self._idle_ref = self.now
+        if self.now - self._idle_ref < 72 * 3600:
             return
         try:
             if self.b.positions():
