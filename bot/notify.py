@@ -83,19 +83,17 @@ def _send(to_addr, subject, body, logger=None, html=None, on_fail=None):
 def send_async(to_addr, subject, body, logger=None, html=None, on_fail=None):
     """Envia el correo en un hilo daemon. No-op (con log) si falta config o destinatario.
 
-    `on_fail` (opcional): callable sin argumentos que se invoca ante CUALQUIER fallo
-    (sin destinatario, sin API key, HTTP, timeout), desde el hilo del envio o, en los
-    no-op, desde el llamador. Sin el, el comportamiento es el de siempre.
+    `on_fail` (opcional): callable sin argumentos que se invoca, desde el hilo del envio,
+    ante un fallo transitorio (HTTPError, timeout u otra excepcion). Sin destinatario o
+    sin API key es config permanente: NO se invoca (consume la espera y se loguea una vez).
     """
     if not to_addr:
         if logger:
             logger.write("ERROR", "Email de objetivo NO enviado: sin destinatario (auth.users).")
-        _failed(on_fail)
         return
     if not is_configured():
         if logger:
             logger.write("SYSTEM", f"RESEND_API_KEY sin configurar: se omite el email a {to_addr} ({subject}).")
-        _failed(on_fail)
         return
     threading.Thread(
         target=_send, args=(to_addr, subject, body, logger, html, on_fail),

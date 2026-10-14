@@ -35,8 +35,7 @@ class AlertManager:
         Un envio fallido (excepcion o sender que devuelve False) NO consume la espera
         del dedupe: se restaura el `_last` previo para poder reintentar (tras una
         pausa corta, para no martillar en cada tick). El sender real (send_async)
-        manda en un hilo y devuelve None: sus fallos (HTTP, timeout, sin API key o
-        sin destinatario) los avisa llamando a `on_fail` desde ese hilo; el callback
+        manda en un hilo y devuelve None: sus fallos transitorios (HTTP, timeout) los avisa llamando a `on_fail` desde ese hilo; el callback
         solo asigna en dos dicts (sin tocar el logger).
         """
         if not self.to_addr:

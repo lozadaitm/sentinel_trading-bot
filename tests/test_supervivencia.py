@@ -1551,7 +1551,7 @@ def test_alert_on_fail_callback():
     # Sender sin on_fail (fakes simples): sin kwarg extra.
     m3 = alerts.AlertManager(FakeLogger(), "a@b.c", "x", sender=lambda to, s, b, lg=None: None, clock=lambda: t[0])
     check(not m3._sender_has_on_fail and m3.notify("k", "AVISO", "s", "b") is True, "sender sin on_fail sigue igual")
-    # send_async real: sin destinatario / sin API key llama a on_fail (nunca envia).
+    # send_async real: sin destinatario / sin API key no envia ni llama on_fail.
     orig_key = config.RESEND_API_KEY
     try:
         config.RESEND_API_KEY = ""
@@ -1559,7 +1559,7 @@ def test_alert_on_fail_callback():
         notify.send_async("", "s", "b", FakeLogger(), on_fail=lambda: got.append("no_to"))
         notify.send_async("a@b.c", "s", "b", FakeLogger(), on_fail=lambda: got.append("no_key"))
         notify.send_async("a@b.c", "s", "b", FakeLogger())   # sin on_fail: igual que siempre
-        check(got == ["no_to", "no_key"], f"send_async no-op avisa on_fail (got {got})")
+        check(got == [], f"send_async sin destinatario/key (config permanente) NO llama on_fail (got {got})")
         # _send con fallo de red (urlopen falla): on_fail desde el propio cuerpo del envio.
         orig_open, config.RESEND_API_KEY = notify.urllib.request.urlopen, "k"
         def boom(*a, **k): raise OSError("sin red")
@@ -1568,7 +1568,7 @@ def test_alert_on_fail_callback():
             notify._send("a@b.c", "s", "b", FakeLogger(), on_fail=lambda: got.append("net"))
         finally:
             notify.urllib.request.urlopen = orig_open
-        check(got[-1] == "net", "_send con excepcion de red avisa on_fail")
+        check(got == ["net"], "_send con excepcion de red avisa on_fail")
     finally:
         config.RESEND_API_KEY = orig_key
 
