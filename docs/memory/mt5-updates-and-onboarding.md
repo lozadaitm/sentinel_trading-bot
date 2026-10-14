@@ -41,3 +41,9 @@ cosas a la vez y los 12 bots quedaron caídos ~45 min (sin daño: las cuentas es
 **Why:** que la próxima alta sea automática de principio a fin (invitación → signup → bot operando), sin pasos manuales en el VPS.
 
 **How to apply:** ante un IPC timeout, sospechar primero de una actualización de MT5 a medias o de un clon sin sembrar. Ver [[mt5-clone-ipc-profile-seed]] y [[private-signup-provisioning]].
+
+**Pendiente de mantenimiento (fin de semana tras el 2026-10-14):**
+- `pip install MetaTrader5` de la build de los terminales (6230 → librería 6231; hoy está la 6090).
+- `restart_all` para cargar el fix de inactividad (a2f07d7).
+- Verificar en Supabase que 26275217/21/22 vuelven a RUNNING.
+- Luego, revisión de los primeros días del candado (tiempo CONGELADO, re-candados, coste de rebotes falsos, avisos).
