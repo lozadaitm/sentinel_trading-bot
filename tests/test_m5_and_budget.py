@@ -970,7 +970,11 @@ def run():
     check("M5: el mismo tick repetido no confirma", not e24.dead and not sent24)
     e24.t += 1
     e24.on_tick()
-    check("M5: 2.a lectura en otro tick => dead + CRITICA",
+    check("M5: 2.a lectura en otro tick => dead (correo aun no, < 30 s)",
+          e24.dead and not sent24, str(sent24))
+    e24.t += _alerts.DEAD_ALERT_CONFIRM_S
+    e24.on_tick()
+    check("M5: dead sostenido 30 s => CRITICA",
           e24.dead and len(sent24) == 1 and "CRITICA" in sent24[0], str(sent24))
 
     # ---------- 25. Lote 3: M5 llama a surv.fit y respeta su resultado ----------

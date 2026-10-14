@@ -322,7 +322,11 @@ def test_dead_account_gate():
     ok = e._open_additive(BUY, 0.10, "Recovery Buy (V-Shape)", ledger.ROLE_RECOVERY, "Recovery")
     errs = [m for t_, m in log.events if t_ == "ERROR"]
     check(e.dead and not ok and not b.orders, "equity 0 => dead y no abre")
-    check(len(errs) == 1 and len(sent) == 1, f"un solo ERROR y un correo en 3 ticks (got {len(errs)}/{len(sent)})")
+    check(len(errs) == 1 and len(sent) == 0, f"un solo ERROR y aun sin correo (<30 s) (got {len(errs)}/{len(sent)})")
+    for i in range(3):
+        e.now = 1_700_000_000 + 2 + alerts.DEAD_ALERT_CONFIRM_S + i
+        alerts.update_dead(e)
+    check(len(sent) == 1, f"dura >= 30 s => exactamente un correo (got {len(sent)})")
     b._equity = 5000.0
     e.now += 5
     alerts.update_dead(e)
@@ -1459,7 +1463,10 @@ def test_zero_equity_needs_two_ticks():
     check(not e.dead and not sent, "0, positiva, 0 => la racha se corta (sin dead)")
     e.now += 1
     alerts.update_dead(e)
-    check(e.dead and len(sent) == 1 and "CRITICA" in sent[0], f"2 lecturas 0 seguidas => dead + CRITICA (got {sent})")
+    check(e.dead and not sent, "2 lecturas 0 seguidas => dead (correo aun no)")
+    e.now += alerts.DEAD_ALERT_CONFIRM_S
+    alerts.update_dead(e)
+    check(e.dead and len(sent) == 1 and "CRITICA" in sent[0], f"dead sostenido 30 s => CRITICA (got {sent})")
     # Equity desconocido (None) tambien corta la racha.
     e2, b2, log2 = _eng(equity=0.0)
     sent2 = _rec_alerts(e2, log2)
@@ -1478,7 +1485,28 @@ def test_zero_equity_needs_two_ticks():
     b3.trade_allowed = lambda: (False, "AutoTrading apagado")
     e3.now = 1_700_000_000
     alerts.update_dead(e3)
-    check(e3.dead and len(sent3) == 1, "trade_allowed falso => muerta al instante (sin confirmacion)")
+    check(e3.dead and not sent3, "trade_allowed falso => bloqueo al instante, sin correo aun")
+    e3.now += alerts.DEAD_ALERT_CONFIRM_S
+    alerts.update_dead(e3)
+    check(e3.dead and len(sent3) == 1, "trade_allowed falso 30 s seguidos => CRITICA")
+    # Corte pasajero (el caso real del 2026-10-14): 2 s sin permiso y vuelve.
+    e4, b4, log4 = _eng(equity=5000.0)
+    sent4 = _rec_alerts(e4, log4)
+    b4.trade_allowed = lambda: (False, "El broker tiene el trading deshabilitado para esta cuenta.")
+    for i in range(3):
+        e4.now = 1_700_000_000 + i
+        alerts.update_dead(e4)
+    check(e4.dead, "corte pasajero: bloquea mientras dura")
+    b4.trade_allowed = lambda: (True, None)
+    e4.now += 1
+    alerts.update_dead(e4)
+    check(not e4.dead and not sent4, "corte de 2 s => se libera y SIN correo")
+    b4.trade_allowed = lambda: (False, "otra vez")
+    e4.now += 100
+    alerts.update_dead(e4)
+    e4.now += alerts.DEAD_ALERT_CONFIRM_S - 1
+    alerts.update_dead(e4)
+    check(not sent4, "episodio nuevo: el plazo de 30 s se reinicia")
     # Llamada directa (sin engine): evaluacion inmediata, como antes.
     check(alerts.account_dead(SurvBroker(equity=0.0)) == (True, "equity <= 0"), "account_dead(broker) directo sigue inmediato")
 

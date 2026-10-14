@@ -8,6 +8,7 @@ from . import config, notify
 DEAD_LOG_EVERY_S = 600      # un ERROR de cuenta muerta cada 10 min como maximo (hora servidor)
 RETRY_AFTER_FAIL_S = 60     # tras un envio fallido, no reintentar antes (evita un intento por tick)
 ZERO_EQUITY_CONFIRM = 2     # lecturas equity <= 0 en ticks distintos para declarar la cuenta muerta
+DEAD_ALERT_CONFIRM_S = 30   # la CRITICA "cuenta muerta" solo sale si dura >= 30 s (hora servidor)
 
 
 class AlertManager:
@@ -120,18 +121,26 @@ def update_dead(engine):
     """Evalua la cuenta muerta en el tick: fija engine.dead, loguea (throttle) y alerta.
 
     Nunca cierra nada ni bloquea gestion/protectoras: solo marca para saltar aperturas
-    aditivas. Se libera sola cuando la condicion desaparece.
+    aditivas. Se libera sola cuando la condicion desaparece. La marca es inmediata;
+    la CRITICA por correo solo si la condicion dura DEAD_ALERT_CONFIRM_S seguidos.
     """
     dead, motivo = account_dead(engine.b, engine)
     if not dead:
         if engine.dead:
             engine.log.write("SYSTEM", "Cuenta operativa de nuevo: se reanudan las aperturas aditivas.")
         engine.dead = False
+        engine._dead_since = None
         return
-    engine.dead = True
+    engine.dead = True   # el bloqueo de aperturas es inmediato
+    if getattr(engine, "_dead_since", None) is None:
+        engine._dead_since = engine.now
     if engine.now - engine._dead_last_log >= DEAD_LOG_EVERY_S:
         engine._dead_last_log = engine.now
         engine.log.write("ERROR", f"CUENTA MUERTA ({motivo}): aperturas aditivas suspendidas.")
+    # El correo espera a que la condicion dure DEAD_ALERT_CONFIRM_S: un "trading
+    # deshabilitado" de 1-2 s al iniciar sesion la cuenta no manda CRITICA (2026-10-14).
+    if engine.now - engine._dead_since < DEAD_ALERT_CONFIRM_S:
+        return
     engine.alerts.notify(
         "cuenta_muerta", "CRITICA", "cuenta muerta",
         f"La cuenta {engine.alerts.label} no puede operar: {motivo}.\n"
