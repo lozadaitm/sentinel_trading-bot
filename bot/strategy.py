@@ -520,11 +520,13 @@ class SentinelEngine:
             if not self._register_open(res, ledger.ROLE_LOCK):
                 fail_rc = getattr(res, "retcode", "sin respuesta del broker")
                 break
-            locked = round(locked + vol, 8)
-            remaining = round(remaining - vol, 8)
+            # A3: con un fill parcial (IOC) cuenta lo realmente abierto, no lo pedido.
+            ticket = getattr(res, "order", 0)
+            got = self._filled_volume(res, ticket, vol, step)
+            locked = round(locked + got, 8)
+            remaining = round(remaining - got, 8)
             # R13: tras (re)poner el candado, el rebote se mide desde el precio de
             # ESTE candado (en un candado partido, la ultima pata confirmada).
-            ticket = getattr(res, "order", 0)
             fill = next((p.price_open for p in self.b.positions() if p.ticket == ticket), None)
             if fill is None:
                 fill = self.b.bid() if otype == mt5.ORDER_TYPE_SELL else self.b.ask()
@@ -532,6 +534,8 @@ class SentinelEngine:
             # F4: cada pata confirmada (candado o re-candado) reinicia el plazo
             # de 24 h de la disolucion.
             self.cycle.set_meta("lock_ref_ts", self.now)
+            if got < vol - 1e-9:
+                break   # fill parcial: falta liquidez; el resto se cubre en el proximo tick
 
         if locked > 0:
             if self.cycle.get_meta("lock_since") is None:
@@ -555,6 +559,22 @@ class SentinelEngine:
             self.alerts.notify("candado_fallido", "CRITICA", "candado de cesta FALLIDO",
                                f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
                                f"({total:.2f} lotes netos).")
+
+    def _filled_volume(self, res, ticket, vol, step):
+        """Lotes realmente abiertos por una orden confirmada (A3): res.volume si
+        viene; si no, el volumen vivo releido del ticket. Si no se puede releer,
+        lo pedido (la orden vino DONE). Redondeado hacia abajo al step."""
+        got = getattr(res, "volume", None)
+        try:
+            got = float(got) if got is not None else 0.0
+        except (TypeError, ValueError):
+            got = 0.0
+        if got <= 0:
+            cur = self.b.positions_checked()
+            live = next((q for q in cur if q.ticket == ticket), None) if cur is not None else None
+            got = live.volume if live is not None else vol
+        got = min(got, vol)
+        return round(math.floor(got / step + 1e-9) * step, 8)
 
     def _maybe_unlock(self):
         """Afloja el candado SOLO con rebote confirmado a favor del neto original
@@ -639,13 +659,22 @@ class SentinelEngine:
             if remaining < step - 1e-9:
                 break
             lots = round(min(p.volume, remaining), 8)
-            frac = lots / p.volume
-            leg_pl = (p.profit + p.swap) * frac   # antes del cierre (el volumen cambia)
+            vol_before = p.volume
+            pl_per_lot = (p.profit + p.swap) / p.volume   # antes del cierre (el volumen cambia)
             if lots >= p.volume - 1e-9:
                 res = self.b.close_position(p, "Basket Unlock")
             else:
                 res = self.b.close_partial(p, lots, "Basket Unlock")
-            if getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+            rc = getattr(res, "retcode", None)
+            if rc == mt5.TRADE_RETCODE_DONE_PARTIAL:
+                # A4: igual que la disolucion (F6), cuenta lo REALMENTE cerrado.
+                got = self._partial_closed_volume(res, p.ticket, vol_before, lots, step)
+                if got >= step - 1e-9:
+                    closed = round(closed + got, 8)
+                    realized += pl_per_lot * got
+                    remaining = round(remaining - got, 8)
+                break
+            if rc != mt5.TRADE_RETCODE_DONE:
                 if self.now >= self._unlock_err_next:
                     self._unlock_err_next = self.now + LOCK_FAIL_LOG_EVERY_S
                     self.log.write("ERROR",
@@ -655,14 +684,19 @@ class SentinelEngine:
                                    balance=self.b.account_balance(), ticket=p.ticket)
                 break
             closed = round(closed + lots, 8)
-            realized += leg_pl
+            realized += pl_per_lot * lots
             remaining = round(remaining - lots, 8)
         if closed <= 0:
             return
 
         self.cycle_realized += realized
-        # 6. Referencia para el siguiente aflojado: este precio.
-        self.cycle.set_meta("unlock_ref_price", price)
+        # 6. Referencia para el siguiente aflojado: este precio. A4: si el cierre
+        # quedo a medias (parcial o rechazo tras algun cierre), la referencia no se
+        # mueve: lo no cerrado sigue autorizado por el MISMO rebote.
+        if remaining < step - 1e-9:
+            self.cycle.set_meta("unlock_ref_price", price)
+        else:
+            self.cycle.set_meta("unlock_ref_price", ref)
         self.cycle.set_meta("last_unlock_ts", self.now)
         s = self.surv.s_now()
         msg = (f"Candado aflojado: cerrados {closed:.2f} lotes (rebote +{rebound:.0f} $). "
@@ -696,6 +730,11 @@ class SentinelEngine:
         aun por cerrar) se persiste en meta "dissolve_pending". Mientras exista,
         aqui SOLO se reintenta cerrar ese resto (backoff 60 s, sin gates de
         hora/dia/24 h; el VCB si bloquea) y nunca se empieza otra pareja.
+
+        A2: una sola pareja por dia UTC. En cuanto se cierra cualquier volumen
+        >= step del primer miembro, el dia queda gastado (last_dissolve_day):
+        un primer miembro parcial o una deuda descartada/recortada no abren una
+        segunda pareja ese dia; el resto espera al dia siguiente.
         """
         ref_ts = self._dissolve_ref_ts()
         if self.cycle.get_meta("dissolve_pending"):
@@ -794,6 +833,8 @@ class SentinelEngine:
             self._dissolve_error(f"Disolucion por parejas RECHAZADA en #{fail1} "
                                  f"(nada cerrado). Se reintenta en {DISSOLVE_RETRY_S} s.")
             return
+        # A2: ya se cerro volumen de la pareja: el dia queda gastado pase lo que pase.
+        self._mark_dissolve_day(day)
         # El segundo miembro cierra exactamente lo que se cerro del primero.
         closed2, real2, fail2, tk2 = self._dissolve_close(second, closed1, step)
         self.cycle_realized += real1 + real2
@@ -806,7 +847,7 @@ class SentinelEngine:
                 "tickets": [p.ticket for p in second],
                 "net_before": net_before, "x": closed1,
                 "first_tickets": tk1, "second_tickets": tk2,
-                "lock_case": lock_case,
+                "lock_case": lock_case, "day": day,
             })
             self._dissolve_retry_next = self.now + DISSOLVE_RETRY_S
             msg = (f"Disolucion por parejas INCOMPLETA: cerrados {closed1:.2f} de "
@@ -819,13 +860,14 @@ class SentinelEngine:
                                f"fuera de neto; no se abre otra pareja hasta cerrarlo.")
             return
         if fail1 is not None:
-            # Primer miembro parcial, segundo completo: neto intacto; reintento con backoff.
-            self._dissolve_retry_next = self.now + DISSOLVE_RETRY_S
+            # Primer miembro parcial, segundo completo: neto intacto. A2: el dia ya
+            # esta gastado; el resto de X espera a la ventana del dia siguiente.
             self._dissolve_error(f"Disolucion por parejas PARCIAL: {closed1:.2f} de {x:.2f} lotes "
-                                 f"(rechazo en #{fail1}). Neto sin cambio; se reintenta en "
-                                 f"{DISSOLVE_RETRY_S} s.")
+                                 f"(rechazo en #{fail1}). Neto sin cambio; el resto espera "
+                                 f"al dia siguiente.")
+            self._dissolve_cleanup(lock_case, ref_ts)
             return
-        self._dissolve_done(closed1, tk1, tk2, lock_case, ref_ts)
+        self._dissolve_done(closed1, tk1, tk2, lock_case, ref_ts, day)
 
     def _dissolve_ref_ts(self):
         """Referencia del plazo de 24 h: el ultimo candado/re-candado (lock_ref_ts),
@@ -845,22 +887,28 @@ class SentinelEngine:
             return   # lectura fallida: nunca descartar la deuda por una lista vacia falsa
         by_t = {p.ticket: p for p in cur}
         alive = [by_t[t] for t in pend["tickets"] if t in by_t and by_t[t].type == ptype]
+        lock_case = bool(pend.get("lock_case"))
         if not alive:
             self.cycle.set_meta("dissolve_pending", None)
             self.log.write("HEALER", "Disolucion: deuda pendiente descartada (sus patas ya no "
                                      "existen).", balance=self.b.account_balance())
+            self._mark_dissolve_day(pend.get("day"))
+            self._dissolve_cleanup(lock_case, ref_ts)
             return
         step = self.b.volume_step()
-        lots = float(pend["lots"])
+        owed = float(pend["lots"])
         # Nunca pasarse del neto previo a la pareja (p. ej. si otro candado ya lo cubrio).
         net = survival.net_lots(cur)
         gap = (net - float(pend["net_before"])) if ptype == mt5.POSITION_TYPE_BUY \
             else (float(pend["net_before"]) - net)
-        lots = round(min(lots, math.floor(max(gap, 0.0) / step + 1e-9) * step), 8)
+        lots = round(min(owed, math.floor(max(gap, 0.0) / step + 1e-9) * step), 8)
+        capped = lots < owed - 1e-9   # R15: recortada por el neto previo
         if lots < step - 1e-9:
             self.cycle.set_meta("dissolve_pending", None)
             self.log.write("HEALER", "Disolucion: deuda pendiente descartada (el neto ya volvio "
                                      "al valor previo).", balance=self.b.account_balance())
+            self._mark_dissolve_day(pend.get("day"))
+            self._dissolve_cleanup(lock_case, ref_ts)
             return
         if self.b.shadow:
             return
@@ -868,7 +916,7 @@ class SentinelEngine:
         self.cycle_realized += real
         tk2 = list(pend.get("second_tickets") or []) + [t for t in tk if t not in
                                                        (pend.get("second_tickets") or [])]
-        rest = round(float(pend["lots"]) - closed, 8)
+        rest = round(owed - closed, 8)
         if fail is not None and rest >= step - 1e-9:
             pend = dict(pend, lots=rest, second_tickets=tk2)
             self.cycle.set_meta("dissolve_pending", pend)
@@ -878,20 +926,37 @@ class SentinelEngine:
             return
         self.cycle.set_meta("dissolve_pending", None)
         if rest >= step - 1e-9:
-            self.log.write("HEALER", f"Disolucion: deuda pendiente descartada con {rest:.2f} lotes "
-                                     f"sin cerrar (patas cerradas fuera).",
-                           balance=self.b.account_balance())
+            if capped and closed >= lots - 1e-9:
+                # R15: se cerro todo lo que cabia hasta el neto previo; el resto ya
+                # lo cubre el neto (p. ej. un re-candado). No es "cerradas fuera".
+                why = (f"recortada a {closed:.2f} lotes por el neto previo (R15); "
+                       f"{rest:.2f} lotes ya cubiertos")
+            else:
+                why = f"descartada con {rest:.2f} lotes sin cerrar (patas cerradas fuera)"
+            self.log.write("HEALER", f"Disolucion: deuda pendiente {why}.",
+                           lots=closed, balance=self.b.account_balance())
+            self._mark_dissolve_day(pend.get("day"))
+            self._dissolve_cleanup(lock_case, ref_ts)
             return
         self._dissolve_done(float(pend["x"]), list(pend.get("first_tickets") or []), tk2,
-                            bool(pend.get("lock_case")), ref_ts)
+                            lock_case, ref_ts, pend.get("day"))
 
-    def _dissolve_done(self, x, tk1, tk2, lock_case, ref_ts):
+    def _dissolve_done(self, x, tk1, tk2, lock_case, ref_ts, day=None):
         """Pareja completa: dia marcado, log HEALER y, si se agoto el candado, meta limpia."""
-        self.cycle.set_meta("last_dissolve_day", self._utc_day())
+        self._mark_dissolve_day(day)
         self.log.write("HEALER",
                        f"Disolucion por parejas: {x:.2f} lotes de {self._tickets_txt(tk1)} + "
                        f"{self._tickets_txt(tk2)}. Neto sin cambio.",
                        lots=x, balance=self.b.account_balance(), ticket=tk1[0] if tk1 else 0)
+        self._dissolve_cleanup(lock_case, ref_ts)
+
+    def _mark_dissolve_day(self, day=None):
+        """A2: gasta el dia UTC de la disolucion. `day` es el dia en que empezo la
+        pareja (guardado en la deuda); sin el (deuda de antes de A2), el de hoy."""
+        self.cycle.set_meta("last_dissolve_day", day or self._utc_day())
+
+    def _dissolve_cleanup(self, lock_case, ref_ts):
+        """Si la disolucion agoto las patas LOCK, limpia la meta del candado."""
         after = self.b.positions_checked() if lock_case else None
         if after is not None and not self.cycle.lock_legs(after):
             # Ultima pata LOCK disuelta: estado LIBRE. La referencia del plazo

@@ -904,7 +904,8 @@ def test_dissolve_second_close_fails():
     check(len(b.partials) == 1 and b.partials[0]["ticket"] == 3, "se cerro solo el rojo (#3)")
     net1 = survival.net_lots(b.positions())
     check(abs(net1 - (net0 - 0.10)) < 1e-9, f"neto fuera exactamente X=0.10 (got {net1})")
-    check(e.cycle.get_meta("last_dissolve_day") is None, "sin last_dissolve_day")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19",
+          "A2: el primer cierre ya gasta el dia (last_dissolve_day)")
     pend = e.cycle.get_meta("dissolve_pending")
     check(pend and pend["side"] == "SELL" and abs(pend["lots"] - 0.10) < 1e-9 and pend["tickets"] == [5],
           f"deuda pendiente SELL 0.10 en #5 (got {pend})")
@@ -1583,6 +1584,202 @@ LOTE1 = [
 ]
 
 
+# --------------------------------------------------------------
+# Lote 2: candado y disolucion (A2, A3, A4)
+# --------------------------------------------------------------
+def _first_member_partial(b, ticket=3, got=0.06):
+    """El broker cierra solo `got` lotes del ticket (DONE_PARTIAL) una vez."""
+    orig = b.close_partial
+    st = {"on": True}
+
+    def partial(p, lots, comment="Partial"):
+        if p.ticket == ticket and st["on"]:
+            st["on"] = False
+            orig(p, got, comment)
+
+            class R:
+                retcode = mt5.TRADE_RETCODE_DONE_PARTIAL
+                volume = got
+            return R()
+        return orig(p, lots, comment)
+    b.close_partial = partial
+    return st
+
+
+def test_dissolve_partial_spends_day():
+    """A2: primer miembro parcial => el dia queda gastado; la siguiente pareja, al dia siguiente."""
+    e, b, log = _dissolve_setup()
+    _first_member_partial(b)
+    net0 = survival.net_lots(b.positions())
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(3, 0.06), (5, 0.06)],
+          f"pareja parcial 0.06 + 0.06 (got {b.partials})")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "neto sin cambio")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19", "A2: dia marcado tras el PARCIAL")
+    check(any(t == "ERROR" and "PARCIAL" in m and "dia siguiente" in m for t, m in log.events),
+          f"ERROR PARCIAL dice que el resto espera al dia siguiente (got {log.events})")
+    for _ in range(5):
+        e.now += 61
+        e._maybe_dissolve()
+    check(len(b.partials) == 2, f"mismo dia (dentro de la ventana): ninguna segunda pareja (got {b.partials})")
+    e.now = ts(2026, 8, 20, 6)   # dia siguiente, 03 UTC
+    e._maybe_dissolve()
+    check(len(b.partials) == 4, f"dia siguiente: nueva pareja (got {b.partials})")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-20", "last_dissolve_day = 2026-08-20")
+    check(abs(survival.net_lots(b.positions()) - net0) < 1e-9, "dia 2: neto sin cambio")
+
+
+def test_dissolve_debt_dropped_spends_day():
+    """A2: deuda descartada (patas cerradas fuera / neto ya de vuelta) => sin segunda pareja ese dia."""
+    for how in ("gone", "net_back"):
+        e, b, log = _dissolve_setup()
+        _fail_lock_closes(b)
+        e._maybe_dissolve()
+        check(e.cycle.get_meta("dissolve_pending") is not None, f"{how}: deuda pendiente")
+        e.cycle.set_meta("last_dissolve_day", None)   # deuda previa a A2: sin dia marcado
+        pend = dict(e.cycle.get_meta("dissolve_pending"))
+        pend.pop("day", None)
+        e.cycle.set_meta("dissolve_pending", pend)
+        if how == "gone":
+            b._pos = [p for p in b._pos if p.ticket != 5]
+        else:
+            _pos(b, 9, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "SMC Buy Entry")   # el neto ya volvio
+            e.cycle.sync(b.positions())
+        e.now += 61
+        e._maybe_dissolve()
+        check(e.cycle.get_meta("dissolve_pending") is None, f"{how}: deuda descartada")
+        check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19", f"{how}: dia marcado al descartar")
+        n = len(b.partials)
+        e.now += 61
+        e._maybe_dissolve()
+        check(len(b.partials) == n, f"{how}: mismo dia, ninguna pareja nueva (got {b.partials})")
+
+
+def test_dissolve_r15_capped_marks_day_and_cleans():
+    """A2/R15: deuda recortada por el neto previo => motivo R15, dia marcado y meta del candado
+    limpia si ya no quedan patas LOCK."""
+    from bot import strategy
+    e, b, log = _lock_eng(equity=5000.0, cfg={"equity_weight": 1.0})
+    _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.10, 4400.0, "Recovery Buy (V-Shape)", profit=100.0)
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Basket Lock", profit=-100.0)
+    e.cycle.sync(b.positions())
+    since = e.now - 25 * 3600
+    e.cycle.set_meta("lock_since", since)
+    e.cycle.set_meta("lock_initial_volume", 0.30)   # X = 0.10
+    orig = b.close_position
+    st = {"fail": True}
+
+    def failing(p, comment="Close"):
+        if p.ticket == 3 and st["fail"]:
+            class R: retcode = 10006
+            return R()
+        return orig(p, comment)
+    b.close_position = failing
+    e._maybe_dissolve()
+    check(5 not in {p.ticket for p in b.positions()}, "primero el rojo: LOCK #5 cerrado entero")
+    pend = e.cycle.get_meta("dissolve_pending")
+    check(pend and pend["side"] == "BUY" and abs(pend["lots"] - 0.10) < 1e-9,
+          f"deuda BUY 0.10 en #3 (got {pend})")
+    check(e.cycle.get_meta("lock_since") == since, "con deuda viva la meta del candado sigue")
+    # Deuda previa a A2 (sin dia) para comprobar que la ruta R15 marca el dia por si misma.
+    e.cycle.set_meta("last_dissolve_day", None)
+    pend = dict(pend)
+    pend.pop("day", None)
+    e.cycle.set_meta("dissolve_pending", pend)
+    # Otra operacion cubre 0.06 del hueco: solo caben 0.04 hasta el neto previo (R15).
+    _pos(b, 9, mt5.POSITION_TYPE_SELL, 0.06, 4400.0, "SMC Sell Entry")
+    e.cycle.sync(b.positions())
+    st["fail"] = False
+    e.now = ts(2026, 8, 19, 16)   # fuera de la ventana: la deuda igual se reintenta
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(3, 0.04)],
+          f"R15: se cierran solo 0.04 de #3 (got {b.partials})")
+    check(abs(survival.net_lots(b.positions())) < 1e-9, "neto de vuelta al previo (0)")
+    check(e.cycle.get_meta("dissolve_pending") is None, "deuda limpia")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19", "R15: dia marcado")
+    check(any(t == "HEALER" and "R15" in m and "recortada" in m for t, m in log.events),
+          f"log HEALER con el motivo R15 (got {log.events})")
+    check(not any("cerradas fuera" in m for t, m in log.events), "sin el motivo equivocado")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FREE, "LIBRE")
+    for k in ("unlock_ref_price", "lock_since", "lock_initial_volume", "lock_ref_ts"):
+        check(e.cycle.get_meta(k) is None, f"{k} a None")
+    check(e.cycle.get_meta("last_unlock_ts") == since, "last_unlock_ts = referencia del plazo")
+
+
+def test_lock_partial_fill_initial_volume():
+    """A3: fill parcial (IOC) del candado SELL y BUY => lock_initial_volume = lo realmente abierto."""
+    from tests.test_m5_and_budget import FakePos as _FP
+    cases = [(mt5.POSITION_TYPE_BUY, "SMC Buy Entry", SELL, True),
+             (mt5.POSITION_TYPE_SELL, "SMC Sell Entry", BUY, False)]
+    for ptype, comment, otype, with_volume in cases:
+        e, b, log = _lock_eng()
+        _pos(b, 1, ptype, 0.34, 4000.0, comment)
+        e.cycle.sync(b.positions())
+
+        def partial_fill(ot, lots, cmt, sl=0.0, tp=0.0, b=b, with_volume=with_volume):
+            got = 0.20
+            ptp = mt5.POSITION_TYPE_BUY if ot == BUY else mt5.POSITION_TYPE_SELL
+            p = _FP(b._next, ptp, got, b.ask() if ot == BUY else b.bid(), 0, cmt, b.magic)
+            b._next += 1
+            b._pos.append(p)
+            b.orders.append({"type": ot, "lots": lots, "comment": cmt, "sl": sl})
+
+            class R:
+                retcode = mt5.TRADE_RETCODE_DONE
+                order = p.ticket
+                volume = got if with_volume else 0.0
+            return R()
+        b.market_order = partial_fill
+        e._maybe_lock()
+        side = "SELL" if otype == SELL else "BUY"
+        check(len(b.orders) == 1 and b.orders[0]["type"] == otype and abs(b.orders[0]["lots"] - 0.34) < 1e-9,
+              f"{side}: se pidieron 0.34 (got {b.orders})")
+        check(abs(e.cycle.get_meta("lock_initial_volume") - 0.20) < 1e-9,
+              f"{side} (volume={'si' if with_volume else 'no'}): lock_initial_volume = 0.20 llenado "
+              f"(got {e.cycle.get_meta('lock_initial_volume')})")
+        check(any(t == "PROTECCION" and f"Candado puesto: 0.20 lotes {side}" in m for t, m in log.events),
+              f"{side}: el log dice lo realmente abierto (got {log.events})")
+
+
+def test_unlock_done_partial_realized():
+    """A4: aflojado DONE_PARTIAL => cycle_realized suma lo realmente cerrado y la referencia no se mueve."""
+    for with_volume in (True, False):
+        e, b, log = _unlock_setup(4451.0)
+        lock = [p for p in b._pos if p.ticket == 2][0]
+        lock.profit = -340.0   # -1000 $/lote
+        orig = b.close_partial
+
+        def partial(p, lots, comment="Partial", orig=orig, with_volume=with_volume):
+            if p.ticket == 2:
+                orig(p, 0.08, comment)
+
+                class R:
+                    retcode = mt5.TRADE_RETCODE_DONE_PARTIAL
+                    volume = 0.08 if with_volume else 0.0
+                return R()
+            return orig(p, lots, comment)
+        b.close_partial = partial
+        e._maybe_unlock()
+        tag = f"volume={'si' if with_volume else 'no'}"
+        check(abs(_lock_vol(e, b) - 0.26) < 1e-9, f"{tag}: se cerraron 0.08 de 0.14 (LOCK {_lock_vol(e, b)})")
+        check(abs(e.cycle_realized - (-80.0)) < 1e-6,
+              f"{tag}: cycle_realized = -80 (0.08 x -1000) (got {e.cycle_realized})")
+        check(e.cycle.get_meta("unlock_ref_price") == 4400.0,
+              f"{tag}: resultado mixto, referencia sin mover (got {e.cycle.get_meta('unlock_ref_price')})")
+        check(e.cycle.get_meta("last_unlock_ts") == e.now, f"{tag}: last_unlock_ts = now")
+        check(any(t == "PROTECCION" and "cerrados 0.08 lotes" in m for t, m in log.events),
+              f"{tag}: log con lo realmente cerrado")
+
+
+LOTE2 = [
+    test_dissolve_partial_spends_day,
+    test_dissolve_debt_dropped_spends_day,
+    test_dissolve_r15_capped_marks_day_and_cleans,
+    test_lock_partial_fill_initial_volume,
+    test_unlock_done_partial_realized,
+]
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -1633,6 +1830,8 @@ def main():
     for t in FIX_WAVE:
         t()
     for t in LOTE1:
+        t()
+    for t in LOTE2:
         t()
     print("\ntest_supervivencia: TODO OK")
 
