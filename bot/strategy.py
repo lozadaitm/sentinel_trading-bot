@@ -418,16 +418,19 @@ class SentinelEngine:
             self.b.modify_sl(p, 0)
         return True
 
-    def _register_open(self, res, role, covers=None):
+    def _register_open(self, res, role, covers=None, accept_partial=False):
         """Registra en el ledger una apertura CONFIRMADA por el broker.
 
         En SHADOW_MODE res es None (no existe posicion real): no se registra y
         el sync() por comments cubriria cualquier hueco si algo quedo abierto.
+        Con accept_partial (solo el candado) un DONE_PARTIAL tambien cuenta:
+        la posicion existe aunque con menos volumen.
         Devuelve True si la apertura quedo confirmada y registrada.
         """
         if res is None:
             return False
-        if getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+        ok = (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL) if accept_partial             else (mt5.TRADE_RETCODE_DONE,)
+        if getattr(res, "retcode", None) in ok:
             self.cycle.register(getattr(res, "order", 0), role, covers=covers)
             return True
         return False
@@ -517,25 +520,31 @@ class SentinelEngine:
                 fail_rc = rc
                 break
             res = self.b.market_order(otype, vol, "Basket Lock")
-            if not self._register_open(res, ledger.ROLE_LOCK):
+            # Un DONE_PARTIAL (IOC) abrio una pata real: se registra como LOCK y no
+            # es un "Candado FALLIDO".
+            if not self._register_open(res, ledger.ROLE_LOCK, accept_partial=True):
                 fail_rc = getattr(res, "retcode", "sin respuesta del broker")
                 break
             # A3: con un fill parcial (IOC) cuenta lo realmente abierto, no lo pedido.
             ticket = getattr(res, "order", 0)
-            got = self._filled_volume(res, ticket, vol, step)
-            locked = round(locked + got, 8)
-            remaining = round(remaining - got, 8)
-            # R13: tras (re)poner el candado, el rebote se mide desde el precio de
-            # ESTE candado (en un candado partido, la ultima pata confirmada).
-            fill = next((p.price_open for p in self.b.positions() if p.ticket == ticket), None)
-            if fill is None:
-                fill = self.b.bid() if otype == mt5.ORDER_TYPE_SELL else self.b.ask()
-            self.cycle.set_meta("unlock_ref_price", float(fill))
-            # F4: cada pata confirmada (candado o re-candado) reinicia el plazo
-            # de 24 h de la disolucion.
-            self.cycle.set_meta("lock_ref_ts", self.now)
+            partial = getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE_PARTIAL
+            got = self._filled_volume(res, ticket, vol, step, partial)
+            if got > 0:
+                locked = round(locked + got, 8)
+                remaining = round(remaining - got, 8)
+                # R13: tras (re)poner el candado, el rebote se mide desde el precio de
+                # ESTE candado (en un candado partido, la ultima pata confirmada).
+                fill = next((p.price_open for p in self.b.positions() if p.ticket == ticket), None)
+                if fill is None:
+                    fill = self.b.bid() if otype == mt5.ORDER_TYPE_SELL else self.b.ask()
+                self.cycle.set_meta("unlock_ref_price", float(fill))
+                # F4: cada pata confirmada (candado o re-candado) reinicia el plazo
+                # de 24 h de la disolucion.
+                self.cycle.set_meta("lock_ref_ts", self.now)
             if got < vol - 1e-9:
-                break   # fill parcial: falta liquidez; el resto se cubre en el proximo tick
+                # Fill parcial (falta liquidez): se corta aqui. El resto solo se cubre
+                # en un tick posterior si S sigue bajo lock_trigger_usd.
+                break
 
         if locked > 0:
             if self.cycle.get_meta("lock_since") is None:
@@ -560,10 +569,11 @@ class SentinelEngine:
                                f"{msg}. Se reintenta cada tick; la cesta sigue expuesta "
                                f"({total:.2f} lotes netos).")
 
-    def _filled_volume(self, res, ticket, vol, step):
+    def _filled_volume(self, res, ticket, vol, step, partial=False):
         """Lotes realmente abiertos por una orden confirmada (A3): res.volume si
         viene; si no, el volumen vivo releido del ticket. Si no se puede releer,
-        lo pedido (la orden vino DONE). Redondeado hacia abajo al step."""
+        lo pedido si la orden vino DONE, o 0 si vino DONE_PARTIAL (lo pedido seria
+        falso seguro). Redondeado hacia abajo al step (bajo un step => 0)."""
         got = getattr(res, "volume", None)
         try:
             got = float(got) if got is not None else 0.0
@@ -572,7 +582,10 @@ class SentinelEngine:
         if got <= 0:
             cur = self.b.positions_checked()
             live = next((q for q in cur if q.ticket == ticket), None) if cur is not None else None
-            got = live.volume if live is not None else vol
+            if live is not None:
+                got = live.volume
+            else:
+                got = 0.0 if partial else vol
         got = min(got, vol)
         return round(math.floor(got / step + 1e-9) * step, 8)
 
@@ -660,7 +673,8 @@ class SentinelEngine:
                 break
             lots = round(min(p.volume, remaining), 8)
             vol_before = p.volume
-            pl_per_lot = (p.profit + p.swap) / p.volume   # antes del cierre (el volumen cambia)
+            # antes del cierre (el volumen cambia)
+            pl_per_lot = (p.profit + p.swap) / p.volume if p.volume > 0 else 0.0
             if lots >= p.volume - 1e-9:
                 res = self.b.close_position(p, "Basket Unlock")
             else:

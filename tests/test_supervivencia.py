@@ -1771,12 +1771,95 @@ def test_unlock_done_partial_realized():
               f"{tag}: log con lo realmente cerrado")
 
 
+def test_lock_open_done_partial():
+    """Revision: un DONE_PARTIAL al abrir el candado se registra como LOCK, sin "Candado FALLIDO";
+    un fill bajo un step no mueve la referencia ni el plazo."""
+    from bot import ledger
+    from tests.test_m5_and_budget import FakePos as _FP
+    for vol_got, rc in ((0.20, mt5.TRADE_RETCODE_DONE_PARTIAL), (0.004, mt5.TRADE_RETCODE_DONE)):
+        e, b, log = _lock_eng()
+        sent = _rec_alerts(e, log)
+        _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+        e.cycle.sync(b.positions())
+
+        def fill(ot, lots, cmt, sl=0.0, tp=0.0, b=b, vol_got=vol_got, rc=rc):
+            p = _FP(b._next, mt5.POSITION_TYPE_SELL, vol_got, b.bid(), 0, cmt, b.magic)
+            b._next += 1
+            b._pos.append(p)
+            b.orders.append({"type": ot, "lots": lots, "comment": cmt, "sl": sl})
+
+            class R:
+                retcode = rc
+                order = p.ticket
+                volume = vol_got
+            return R()
+        b.market_order = fill
+        e._maybe_lock()
+        lock = [p for p in b._pos if p.comment == "Basket Lock"][0]
+        check(e.cycle.role_of(lock.ticket) == ledger.ROLE_LOCK, f"{vol_got}: pata registrada como LOCK")
+        check(not any(t == "ERROR" and "FALLIDO" in m for t, m in log.events),
+              f"{vol_got}: sin 'Candado FALLIDO' (got {log.events})")
+        check(not any("FALLIDO" in x for x in sent), f"{vol_got}: sin alerta CRITICA (got {sent})")
+        if vol_got >= 0.01:
+            check(abs(e.cycle.get_meta("lock_initial_volume") - 0.20) < 1e-9,
+                  "DONE_PARTIAL 0.20: lock_initial_volume = 0.20")
+            check(e.cycle.get_meta("lock_ref_ts") == e.now, "DONE_PARTIAL: lock_ref_ts = now")
+        else:
+            check(e.cycle.get_meta("unlock_ref_price") is None and e.cycle.get_meta("lock_ref_ts") is None,
+                  "fill bajo un step: ni unlock_ref_price ni lock_ref_ts")
+            check(e.cycle.get_meta("lock_initial_volume") is None, "fill bajo un step: sin lock_initial_volume")
+
+
+def test_dissolve_debt_next_day_keeps_day():
+    """A2: una deuda que se completa el dia D+1 conserva el dia D de la pareja."""
+    e, b, log = _dissolve_setup()
+    st = _fail_lock_closes(b)
+    e._maybe_dissolve()
+    check(e.cycle.get_meta("dissolve_pending")["day"] == "2026-08-19", "la deuda guarda el dia D")
+    st["fail"] = False
+    e.now = ts(2026, 8, 20, 5)   # D+1, 02 UTC (fuera de la ventana)
+    e._maybe_dissolve()
+    check(e.cycle.get_meta("dissolve_pending") is None, "deuda completada en D+1")
+    check(e.cycle.get_meta("last_dissolve_day") == "2026-08-19",
+          f"last_dissolve_day sigue en D (got {e.cycle.get_meta('last_dissolve_day')})")
+    n = len(b.partials)
+    e.now = ts(2026, 8, 20, 6)   # D+1, 03 UTC
+    e._maybe_dissolve()
+    check(len(b.partials) > n and e.cycle.get_meta("last_dissolve_day") == "2026-08-20",
+          f"D+1 en la ventana: nueva pareja (got {b.partials[n:]})")
+
+
+def test_unlock_multileg_reject_keeps_ref():
+    """A4: varias patas LOCK, la nueva cierra y la siguiente se rechaza => referencia sin mover."""
+    e, b, log = _lock_eng(equity=7000.0)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4400.0, "SMC Buy Entry")
+    _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.20, 4400.0, "Basket Lock", t=1_700_000_000)
+    new = _pos(b, 3, mt5.POSITION_TYPE_SELL, 0.10, 4400.0, "Basket Lock", t=1_700_000_500)
+    e.cycle.sync(b.positions())
+    orig = b.close_partial
+
+    def reject(p, lots, comment="Partial"):
+        if p.ticket == 2:
+            class R: retcode = 10006
+            return R()
+        return orig(p, lots, comment)
+    b.close_partial = reject
+    b._price = 4451.0
+    e._maybe_unlock()
+    check(new not in b._pos and abs(_lock_vol(e, b) - 0.20) < 1e-9, "la nueva (0.10) cerro; la vieja rechazada")
+    check(e.cycle.get_meta("unlock_ref_price") == 4400.0,
+          f"resultado mixto: referencia sin mover (got {e.cycle.get_meta('unlock_ref_price')})")
+
+
 LOTE2 = [
     test_dissolve_partial_spends_day,
     test_dissolve_debt_dropped_spends_day,
     test_dissolve_r15_capped_marks_day_and_cleans,
     test_lock_partial_fill_initial_volume,
     test_unlock_done_partial_realized,
+    test_lock_open_done_partial,
+    test_dissolve_debt_next_day_keeps_day,
+    test_unlock_multileg_reject_keeps_ref,
 ]
 
 
