@@ -631,7 +631,9 @@ class SentinelEngine:
 
         # 4. Volumen: el mayor v que deja S >= survival_move_usd y el neto propio en cupo.
         # S cae y |neto propio| crece de forma monotona con v: busqueda binaria
-        # sobre k (acota las llamadas a MT5 por tick).
+        # sobre k (acota las llamadas a MT5 por tick). Asume que el neto no-LOCK
+        # (el de `positions`, sin las coberturas) no se opone a dir_orig: asi
+        # sumar v en dir_orig solo puede aumentar |neto| y empeorar S.
         # Una sola foto de la cuenta; si MT5 no responde no se afloja (desconocido).
         snap = self.surv.snapshot()
         if snap is None:
@@ -1060,12 +1062,22 @@ class SentinelEngine:
                                    f"(retcode {getattr(res, 'retcode', '?')}). Se reintenta.",
                                    balance=self.b.account_balance(), ticket=p.ticket)
 
+    def _prune_hedge_fail(self, positions):
+        """Purga de _hedge_fail_next los tickets que ya no estan abiertos.
+        Reutiliza la lista chequeada del tick (cero lecturas MT5 extra); con
+        None (lectura fallida) no hace nada, para no olvidar tickets vivos."""
+        if positions is None or not self._hedge_fail_next:
+            return
+        alive = {p.ticket for p in positions}
+        for t in [t for t in self._hedge_fail_next if t not in alive]:
+            del self._hedge_fail_next[t]
+
     def _news_note(self, what):
         """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
-        ventana de noticia. En modo observacion es el dato que calibra los
-        umbrales antes de activar el enforcement. Con enforcement activo no
-        deberia ocurrir nunca (el bloqueo no tiene excepciones): si aparece,
-        se marca como inesperado."""
+        ventana de noticia. En modo observacion (news_enforce=False) es el dato
+        que calibra los umbrales antes de activar el enforcement. Con
+        enforcement activo no deberia ocurrir nunca (el bloqueo no tiene
+        excepciones): si aparece, se marca como inesperado."""
         if not self.news_active:
             return
         modo = "bloqueo activo (inesperado)" if self.news_block else "observacion"
@@ -1802,6 +1814,7 @@ class SentinelEngine:
                                balance=self.b.account_balance())
             return
         self.cycle.sync(_pos_tick)
+        self._prune_hedge_fail(_pos_tick)
         self._backfill_lock_since(_pos_tick)
 
         # Candado de cesta (spec §5.3): se evalua ANTES de los subsistemas y el
@@ -1991,7 +2004,8 @@ class SentinelEngine:
                 return
             if is_friday_mode or is_weekly_start_wait:
                 return
-            if self.last_recovery_close_time > 0 and (self.now - self.last_recovery_close_time < int(self._p("cooldown_seconds"))):
+            if (self.last_recovery_close_time > 0
+                    and self.now - self.last_recovery_close_time < int(self._p("cooldown_seconds"))):
                 return
 
             lots = self._calculate_lots(False)

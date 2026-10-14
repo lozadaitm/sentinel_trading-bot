@@ -137,8 +137,52 @@ class SimBroker:
             return float("inf")
         return self.account_equity() / um * 100.0
 
+    def account_margin(self):
+        """Margen usado (todas las posiciones). Nunca None en el sim."""
+        return self._used_margin()
+
+    def contract_size(self):
+        """Onzas por lote."""
+        return float(self.specs["contract_size"])
+
+    def account_snapshot(self):
+        """Foto coherente de la cuenta, con los campos de account_info() que
+        usa SurvivalGuard (equity, margin, margin_so_so, balance...)."""
+        return SimpleNamespace(
+            balance=self.balance,
+            equity=self.account_equity(),
+            margin=self._used_margin(),
+            margin_free=self.margin_free(),
+            margin_so_so=float(self.specs.get("stop_out_level", 50.0)),
+            margin_so_call=float(self.specs.get("margin_call_level", 100.0)),
+            trade_allowed=True,
+            trade_expert=True,
+        )
+
     def positions(self):
         return list(self._positions)
+
+    def positions_all_checked(self):
+        """Como positions_all; en el sim la lectura nunca falla (nunca None)."""
+        return list(self._positions)
+
+    def positions_checked(self):
+        """Posiciones de nuestro magic; nunca None en el sim."""
+        return [p for p in self._positions if p.magic == self.magic]
+
+    def trade_allowed(self):
+        """(permitido, motivo). El sim siempre permite operar."""
+        return True, ""
+
+    def order_check(self, order_type, lots):
+        """Pre-chequeo simulado: (ok, retcode). (True, 0) salvo que el margen
+        libre no cubra el margen que exige la orden."""
+        if self.shadow:
+            return True, 0
+        need = self.order_margin(order_type, float(lots))
+        if need > 0 and self.margin_free() < need:
+            return False, mt5.TRADE_RETCODE_NO_MONEY
+        return True, 0
 
     def positions_all(self):
         """En el sim solo existe un bot: todas las posiciones son suyas."""

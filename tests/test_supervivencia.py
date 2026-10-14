@@ -56,6 +56,8 @@ def test_survival_math():
     check(survival.survival_usd(500, 2000, 50, 0.1, 100) == 0.0, "equity bajo el stop-out => 0")
     check(survival.parse_hours("1,13, 14,15") == {1, 13, 14, 15}, "parse_hours")
     check(survival.parse_hours("") == set(), "parse_hours vacio")
+    check(survival.parse_hours("1, 13,,14 ") == {1, 13, 14}, "parse_hours tolera espacios y tokens vacios")
+    check(survival.parse_hours(" , ,x,24,-1") == set(), "parse_hours ignora basura y fuera de rango")
 
 
 def fit_with_net(own_net_buy, req=0.20):
@@ -2189,6 +2191,24 @@ def test_lock_to_orphan_degradation_logged():
           "con ENTRY viva el candado sigue LOCK y no hay log de degradacion")
 
 
+def test_hedge_fail_next_pruned():
+    """Lote 4: _hedge_fail_next se purga de tickets cerrados con la lista del tick;
+    una lectura fallida (None) no purga nada."""
+    _ind, orig = _no_signals()
+    try:
+        e, b, log, _, _ = _tick_eng(equity=5000.0)
+        _pos(b, 3, mt5.POSITION_TYPE_BUY, 0.1, 4400.0, "Recovery Buy (V-Shape)", profit=0.0)
+        e._hedge_fail_next = {3: 1e12, 99: 1e12}
+        e._prune_hedge_fail(None)
+        check(set(e._hedge_fail_next) == {3, 99}, "lectura None no purga")
+        e._prune_hedge_fail(b.positions())
+        check(set(e._hedge_fail_next) == {3}, f"purga el ticket cerrado ({set(e._hedge_fail_next)})")
+        e._prune_hedge_fail([])
+        check(e._hedge_fail_next == {}, "lista vacia valida purga todo")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
 LOTE3 = [
     test_fit_margin_route,
     test_fit_other_bot_s_branch,
@@ -2201,6 +2221,7 @@ LOTE3 = [
     test_lock_split_by_volume_max,
     test_dissolve_lock_initial_volume_fallback,
     test_lock_to_orphan_degradation_logged,
+    test_hedge_fail_next_pruned,
 ]
 
 

@@ -71,14 +71,15 @@ UPDATE public.bot_config
  WHERE bot_id = 'm5';
 
 -- ---- 4. ROLLBACK (comentado) --------------------------------------
--- ANTES de aplicar esta migracion, ejecuta este SELECT y guarda la salida
--- EN LOCAL (no en el repo; el repo es publico):
+-- [PROSA - NO DESCOMENTAR] ANTES de aplicar esta migracion, ejecuta este
+-- [PROSA - NO DESCOMENTAR] SELECT y guarda la salida EN LOCAL (no en el repo;
+-- [PROSA - NO DESCOMENTAR] el repo es publico):
 --
 --   SELECT user_id, bot_id, margin_cap_pct, ml_no_add, ml_flatten, inp_max_spread
 --     FROM public.bot_config;
 --
--- Para revertir: descomenta y ejecuta lo siguiente.
--- Las columnas nuevas se conservan a proposito (el codigo viejo las ignora).
+-- [PROSA - NO DESCOMENTAR] Para revertir: descomenta solo las lineas de SQL.
+-- [PROSA - NO DESCOMENTAR] Las columnas nuevas se conservan a proposito (el codigo viejo las ignora).
 --
 -- UPDATE public.bot_config
 --    SET max_net_lots      = 1,
@@ -87,18 +88,21 @@ UPDATE public.bot_config
 --        m5_max_lot_cap    = 0.5,
 --        news_enforce      = false;
 --
--- ATENCION: los dos UPDATE siguientes DEBEN restringirse a la UNICA fila
--- identificada en el SELECT guardado en local (solo una fila de cada bot tenia
--- esos valores). Sin el filtro por user_id se aplicarian a TODAS las filas.
+-- [PROSA - NO DESCOMENTAR] ATENCION: los dos UPDATE siguientes DEBEN
+-- [PROSA - NO DESCOMENTAR] restringirse a la UNICA fila identificada en el
+-- [PROSA - NO DESCOMENTAR] SELECT guardado en local (solo una fila de cada bot
+-- [PROSA - NO DESCOMENTAR] tenia esos valores). Sin el filtro por user_id se
+-- [PROSA - NO DESCOMENTAR] aplicarian a TODAS las filas.
 --
--- -- La fila m5 que tenia 10 / 400 / 250 (margin_cap_pct / ml_no_add / ml_flatten):
+-- [PROSA - NO DESCOMENTAR] La fila m5 que tenia 10 / 400 / 250 (margin_cap_pct / ml_no_add / ml_flatten):
 -- UPDATE public.bot_config
 --    SET margin_cap_pct = 10, ml_no_add = 400, ml_flatten = 250
 --  WHERE bot_id = 'm5'
 --    AND user_id = '<UUID de la fila, tomado del SELECT guardado>';
 --
--- -- La fila m15 que tenia inp_max_spread 300. Sus margin_cap_pct / ml_no_add /
--- -- ml_flatten ya eran 60 / 200 / 0 (iguales a los nuevos): no requieren cambio.
+-- [PROSA - NO DESCOMENTAR] La fila m15 que tenia inp_max_spread 300. Sus
+-- [PROSA - NO DESCOMENTAR] margin_cap_pct / ml_no_add / ml_flatten ya eran
+-- [PROSA - NO DESCOMENTAR] 60 / 200 / 0 (iguales a los nuevos): no requieren cambio.
 -- UPDATE public.bot_config
 --    SET inp_max_spread = 300
 --  WHERE bot_id = 'm15'
