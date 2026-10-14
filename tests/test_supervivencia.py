@@ -156,13 +156,16 @@ def test_entry_sets_ref_lot_and_rescue_counter():
 
 def test_no_fixed_lot_caps():
     e, b, log = _eng(equity=500000.0, cfg={})
-    check(e._calculate_lots(False) > 1.0, "M15 sin tope fijo de entry (>1.0)")
-    check(e._calculate_lots(True) > 2.0, "M15 sin tope fijo de recovery")
+    # 500000 / 5000 * 0.12 = 12.0 lotes: valor exacto, no solo "> 1.0" (un tope fijo
+    # viejo de 1.0 / 2.0 / 0.5 lo recortaria y el valor cambiaria).
+    check(abs(e._calculate_lots(False) - 12.0) < 1e-9, f"M15 sin tope fijo de entry (12.0, got {e._calculate_lots(False)})")
+    check(abs(e._calculate_lots(True) - 12.0) < 1e-9, f"M15 sin tope fijo de recovery (12.0, got {e._calculate_lots(True)})")
     from bot.strategy_m5 import M5Engine
     b5 = SurvBroker(equity=500000.0, magic=M5)
     m5 = M5Engine(b5, FakeLogger())
     m5.cfg = {}
-    check(m5._calculate_lots() > 0.50, "M5 sin tope m5_max_lot_cap (>0.50)")
+    check(abs(m5._calculate_lots() - 10.0) < 1e-9,
+          f"M5 sin tope m5_max_lot_cap (500000/1000*0.02 = 10.0, got {m5._calculate_lots()})")
 
 
 def test_min_lot_account_blocks_once():
@@ -194,6 +197,10 @@ def test_rescue_cooldown_only_when_sent():
         e._check_rescue(legs)
         if blocked:
             check(not b.orders and e.last_rescue_time == 0, "rescate bloqueado por supervivencia NO inicia cooldown")
+            # No pasar en vacio: el bloqueo debe ser el de supervivencia (evento BUDGET),
+            # no un gate previo del rescate (hora de riesgo, noticias, etc.).
+            check(any(t == "BUDGET" and "bloqueada por tope de supervivencia" in m for t, m in log.events),
+                  f"el bloqueo es el de supervivencia: evento BUDGET (got {log.events})")
         else:
             check(e.last_rescue_time == e.now, "rescate enviado pero rechazado SI inicia cooldown")
 
@@ -229,10 +236,11 @@ def test_rescue_churn_capped():
         p.profit = -300.0
         b._pos.append(p)
         legs.append(p)
+    leg_tickets = {q.ticket for q in legs}
     for _ in range(5):
         e._check_rescue(legs)
-        for q in list(b._pos):          # "cobrar" la Op4 recien abierta
-            if q not in legs:
+        for q in list(b._pos):          # "cobrar" la Op4 recien abierta (por ticket, no por identidad)
+            if q.ticket not in leg_tickets:
                 b._pos.remove(q)
     check(len(b.orders) == 3, f"tras 3 aperturas la cuarta no se envia (ordenes: {len(b.orders)})")
     check(e.cycle.get_meta("rescue_opened") == 3, "rescue_opened == 3")
@@ -1863,6 +1871,339 @@ LOTE2 = [
 ]
 
 
+# ----------------------------------------------------------------------
+# Lote 3: pruebas que faltaban (grupo B). Solo pruebas, sin tocar bot/.
+# ----------------------------------------------------------------------
+def test_fit_margin_route():
+    """fit por la ruta del MARGEN: order_margin(v) = v * _mpl resta equity libre."""
+    b = SurvBroker(equity=7000.0)
+    g, log = guard(b)
+    check(abs(g.fit(BUY, 0.20, "Entry") - 0.20) < 1e-9, "control: sin margen por lote cabe 0.20")
+    b._mpl = 10000.0
+    # S(v) = (7000 - 0.5 * v * 10000) / (v * 100) >= 350  =>  v <= 7000/40000 = 0.175 => 0.17
+    v = g.fit(BUY, 0.20, "Entry2")
+    check(abs(v - 0.17) < 1e-9, f"margen 10000/lote: 0.20 recortado a 0.17 por margen (got {v})")
+    s17 = g.s_with_delta(0.17, b.order_margin(BUY, 0.17))
+    s18 = g.s_with_delta(0.18, b.order_margin(BUY, 0.18))
+    check(s17 >= 350 and s18 < 350, f"0.17 aguanta (S={s17:.1f}) y 0.18 no (S={s18:.1f})")
+    check(any(t == "BUDGET" and "Entry2 reducida 0.20" in m and "0.17" in m for t, m in log.events),
+          "log BUDGET del recorte por margen")
+
+
+def test_fit_other_bot_s_branch():
+    """Rama 'S de otro bot': la exposicion del vecino (otro magic) baja S de la cuenta aunque
+    el neto PROPIO sea 0; el cupo propio (peso) no es lo que limita."""
+    b = SurvBroker(equity=7000.0)
+    add(b, BUY, 0.05, magic=M5)      # vecino largo 0.05; neto propio M15 = 0
+    g, log = guard(b, M15, 1.0)
+    v = g.fit(BUY, 0.20, "Entry")
+    # S = 7000 / ((0.05 + v) * 100) >= 350  =>  v <= 0.15 (el cupo propio seria 0.20)
+    check(abs(v - 0.15) < 1e-9, f"vecino largo 0.05: M15 BUY 0.20 recortado a 0.15 por S de cuenta (got {v})")
+    # El vecino en contra del lado pedido libera S: la peticion cabe entera.
+    b2 = SurvBroker(equity=7000.0)
+    add(b2, SELL, 0.05, magic=M5)
+    g2, _ = guard(b2, M15, 1.0)
+    v2 = g2.fit(BUY, 0.20, "Entry")
+    check(abs(v2 - 0.20) < 1e-9, f"vecino corto 0.05: BUY 0.20 cabe entero (got {v2})")
+    # Control de la rama contraria: con peso 0.5 manda el cupo propio (0.10), no S.
+    b3 = SurvBroker(equity=7000.0)
+    g3, _ = guard(b3, M15, 0.5)
+    v3 = g3.fit(BUY, 0.20, "Entry")
+    check(abs(v3 - 0.10) < 1e-9, f"peso 0.5 sin vecino: cupo propio 0.10 (got {v3})")
+
+
+def test_fit_budget_relog():
+    """Dedupe del BUDGET: no re-loguea el mismo recorte, pero SI vuelve a loguear tras
+    caber entero (se resetea) y al cambiar de tipo (recorte -> bloqueo)."""
+    def n_budget(log):
+        return sum(1 for t, _ in log.events if t == "BUDGET")
+    b = SurvBroker(equity=7000.0)
+    add(b, BUY, 0.05)
+    g, log = guard(b)
+    g.fit(BUY, 0.20, "Recovery")
+    g.fit(BUY, 0.20, "Recovery")
+    check(n_budget(log) == 1, f"mismo recorte repetido: 1 solo evento (got {n_budget(log)})")
+    # Cabe entero (la posicion desaparece): sin log y el dedupe se reinicia.
+    b._pos.clear()
+    check(abs(g.fit(BUY, 0.20, "Recovery") - 0.20) < 1e-9 and n_budget(log) == 1, "cabe entero: sin log nuevo")
+    add(b, BUY, 0.05)
+    g.fit(BUY, 0.20, "Recovery")
+    check(n_budget(log) == 2, f"vuelve a recortarse tras caber entero: relog (got {n_budget(log)})")
+    # recorte -> bloqueo con la misma etiqueta: tipo distinto, relog.
+    b._pos[0].volume = 0.196
+    g.fit(BUY, 0.20, "Recovery")
+    check(n_budget(log) == 3 and "bloqueada" in log.events[-1][1],
+          f"recorte -> bloqueo: relog con 'bloqueada' (got {log.events[-1]})")
+    # Etiquetas distintas no se pisan entre si.
+    g.fit(BUY, 0.20, "Rescue")
+    g.fit(BUY, 0.20, "Recovery")
+    check(n_budget(log) == 4, f"alternar etiquetas no re-loguea la ya logueada (got {n_budget(log)})")
+
+
+def test_fit_below_volume_min():
+    """Si lo que cabe es menor que volume_min => 0.0 (no se redondea hacia arriba) y se loguea."""
+    b = SurvBroker(equity=300.0)       # n_max = 300/(350*100) = 0.0086 < 0.01
+    g, log = guard(b)
+    v = g.fit(BUY, 0.20, "Recovery")
+    check(v == 0.0, f"cabe 0.0086 < volume_min 0.01 => 0.0 (got {v})")
+    check(any(t == "BUDGET" and "bloqueada" in m and "no cabe 0.01" in m for t, m in log.events),
+          f"log BUDGET bloqueada (got {log.events})")
+    # volume_min 0.10 con cupo 0.057: cabrian 0.05 por step, pero eso queda bajo el minimo.
+    b2 = SurvBroker(equity=2000.0)
+    b2.volume_min = lambda: 0.10
+    g2, _ = guard(b2)
+    check(g2.fit(BUY, 0.20, "Recovery") == 0.0, "volume_min 0.10 y cupo 0.057 => 0.0")
+    b3 = SurvBroker(equity=2000.0)
+    g3, _ = guard(b3)
+    check(abs(g3.fit(BUY, 0.20, "Recovery") - 0.05) < 1e-9, "control: con volume_min 0.01 caben 0.05")
+
+
+def test_trailing_uses_move_usd_thresholds():
+    """Trailing de cesta con los umbrales en movimiento (USD/oz * ref_lot * contrato):
+    armado (basket_arm_move_usd), clamp del retroceso (min/max) y min_green_move_usd.
+    ref_lot 0.10, contrato 100 => 1 USD de movimiento = 10 USD de dinero."""
+    _ind, orig = _no_signals()
+    try:
+        def mk(cfg_extra=None, ref=0.10, profit=0.0):
+            e, b, log, _, _ = _tick_eng(equity=50000.0)
+            e.cfg = {"equity_weight": 1.0, "commission_per_lot": 0.0, **(cfg_extra or {})}
+            ent = _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.10, 4000.0, "SMC Buy Entry", profit=profit)
+            ent.price_current = 4000.0
+            e.cycle.set_meta("ref_lot", ref)
+            return e, b, ent
+
+        def tick(e, ent, profit, now_add=1):
+            ent.profit = profit
+            e.now += now_add
+            e.on_tick()
+
+        # --- armado: 0.83 * 10 = 8.30 ---
+        e, b, ent = mk()
+        tick(e, ent, 8.2)
+        check(not e.cycle_armed, "net 8.2 < 8.30: no arma")
+        tick(e, ent, 8.4)
+        check(e.cycle_armed and abs(e.max_cycle_peak - 8.4) < 1e-9, "net 8.4 >= 8.30: arma y sigue el pico")
+        # el umbral escala con ref_lot (0.20 => 16.60) y con la config
+        e, b, ent = mk(ref=0.20)
+        tick(e, ent, 8.4)
+        check(not e.cycle_armed, "ref_lot 0.20: 8.4 < 16.60 no arma (umbral escala con el lote)")
+        e, b, ent = mk({"basket_arm_move_usd": 2.0})
+        tick(e, ent, 8.4)
+        check(not e.cycle_armed, "basket_arm_move_usd=2.0 => 20.0: 8.4 no arma (se lee la clave en pips)")
+        tick(e, ent, 20.5)
+        check(e.cycle_armed, "20.5 >= 20.0: arma")
+
+        # --- retroceso minimo: vol_money*mult << 1.1 => clamp a retrace_min (0.11*10 = 1.1) ---
+        e, b, ent = mk({"retrace_atr_mult": 0.001})
+        e.cycle_armed, e.max_cycle_peak = True, 20.0
+        tick(e, ent, 18.95)                       # cae 1.05 < 1.1
+        check(ent in b._pos, "retroceso 1.05 < min 1.10: no cierra")
+        tick(e, ent, 18.8)                        # cae 1.2 >= 1.1
+        check(ent not in b._pos, "retroceso 1.20 >= min 1.10: cierra")
+        # --- retroceso maximo: vol_money*mult >> 56 => clamp a retrace_max (5.6*10 = 56) ---
+        e, b, ent = mk({"retrace_atr_mult": 10.0})
+        e.cycle_armed, e.max_cycle_peak = True, 100.0
+        tick(e, ent, 45.0)                        # cae 55 < 56
+        check(ent in b._pos, "retroceso 55 < max 56: no cierra (sin clamp max seria 200)")
+        tick(e, ent, 43.0)                        # cae 57 >= 56
+        check(ent not in b._pos, "retroceso 57 >= max 56: cierra (clamp max)")
+        # --- min_green: OP1 sola, retroceso con net < 0.33*10 = 3.30 => desarma, NO cierra ---
+        e, b, ent = mk({"retrace_atr_mult": 0.001})
+        e.cycle_armed, e.max_cycle_peak = True, 20.0
+        tick(e, ent, 3.0)
+        check(ent in b._pos and not e.cycle_armed and e.max_cycle_peak == 0.0,
+              "net 3.0 < min_green 3.30: desarma, la posicion sigue viva")
+        e, b, ent = mk({"retrace_atr_mult": 0.001})
+        e.cycle_armed, e.max_cycle_peak = True, 20.0
+        tick(e, ent, 3.5)
+        check(ent not in b._pos, "net 3.5 >= min_green 3.30: cierra con el trail")
+        e, b, ent = mk({"retrace_atr_mult": 0.001, "min_green_move_usd": 0.5})
+        e.cycle_armed, e.max_cycle_peak = True, 20.0
+        tick(e, ent, 3.5)
+        check(ent in b._pos and not e.cycle_armed, "min_green_move_usd=0.5 => 5.0: net 3.5 ahora desarma")
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_ref_lot_fallback_without_meta():
+    """_ref_lot sin meta ref_lot = el lote de entrada que dimensionaria hoy; con meta, la meta."""
+    e, b, log = _eng(equity=7000.0)
+    check(e.cycle.get_meta("ref_lot") is None, "sin meta ref_lot")
+    check(abs(e._ref_lot() - 0.16) < 1e-9, f"fallback = _calculate_lots(False) = 0.16 (got {e._ref_lot()})")
+    check(abs(e._move_money(1.0) - 16.0) < 1e-9, f"_move_money(1.0) = 1 * 0.16 * 100 = 16 (got {e._move_money(1.0)})")
+    e.cycle.set_meta("ref_lot", 0.05)
+    check(abs(e._ref_lot() - 0.05) < 1e-9, "con meta manda la meta")
+    e2, _, _ = _eng(equity=14000.0)
+    check(abs(e2._ref_lot() - 0.33) < 1e-9, f"el fallback escala con el equity (got {e2._ref_lot()})")
+
+
+def test_risk_hour_blocks_recovery_in_tick():
+    """Gate de hora de riesgo en la rama de RECUPERACION (cycle_count == 2) de on_tick.
+    Control: la misma situacion fuera de hora de riesgo SI abre la recovery."""
+    for risk in (True, False):
+        _ind, orig = _no_signals()
+        try:
+            _ind.get_h4_structure = lambda df, use=True: 1
+            e, b, log, _, _ = _tick_eng(equity=5000.0)
+            e.cfg = {"equity_weight": 1.0}
+            _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.09, 4000.0, "SMC Buy Entry", profit=-5.0)
+            _pos(b, 2, mt5.POSITION_TYPE_SELL, 0.09, 4000.0, "Hedge Lock", profit=0.0)
+            b._price = 3990.0
+            for p in b._pos:
+                p.price_current = 3990.0
+            e.cycle.set_meta("ref_lot", 0.09)
+            base_fb = e._compute_buffers
+
+            def buffers():
+                base_fb()
+                e.atr0, e.atr1 = 2.5, 2.0     # OP3 exige atr0 > atr1
+                return True
+            e._compute_buffers = buffers
+            e.now = (ts(2026, 8, 19, 16) + 1800) if risk else (ts(2026, 8, 19, 6) + 1800)
+            check(e._risk_hour() is risk, f"hora de riesgo = {risk}")
+            e.on_tick()
+            recs = [o for o in b.orders if o["comment"].startswith("Recovery")]
+            if risk:
+                check(not b.orders, f"hora de riesgo: on_tick no abre recovery ni nada (got {b.orders})")
+            else:
+                check(len(recs) == 1 and recs[0]["type"] == BUY,
+                      f"fuera de hora de riesgo la recovery BUY abre (got {b.orders})")
+        finally:
+            _ind.get_h4_structure, _ind.check_m15_breakout = orig
+
+
+def test_lock_send_rejected_after_order_check():
+    """order_check pasa pero el ENVIO es rechazado: Candado FALLIDO con el retcode, alerta
+    CRITICA, ninguna pata LOCK ni meta del candado; el siguiente intento puede ponerlo."""
+    e, b, log = _lock_eng()
+    sent = _rec_alerts(e, log)
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    check(b.order_check(SELL, 0.34) == (True, 0), "order_check OK")
+    attempts = []
+    orig_mo = b.market_order
+
+    class Rej:
+        retcode = 10006
+        order = 0
+
+    def rejecting(otype, lots, comment, sl=0.0, tp=0.0):
+        attempts.append(lots)
+        return Rej()
+    b.market_order = rejecting
+    e._maybe_lock()
+    check(attempts == [0.34], f"se intento enviar 0.34 (got {attempts})")
+    check(not [p for p in b._pos if p.comment == "Basket Lock"], "ninguna pata LOCK abierta")
+    check(e.cycle.get_meta("lock_initial_volume") is None and e.cycle.get_meta("lock_since") is None,
+          "sin meta del candado")
+    check(any(t == "ERROR" and "Candado FALLIDO (10006)" in m for t, m in log.events),
+          f"ERROR 'Candado FALLIDO (10006)' (got {log.events})")
+    check(len(sent) == 1 and "CRITICA" in sent[0], f"alerta CRITICA 'candado_fallido' (got {sent})")
+    check(not any(t == "PROTECCION" for t, _ in log.events), "no se loguea 'Candado puesto'")
+    # El siguiente tick, con el broker ya aceptando, lo pone.
+    b.market_order = orig_mo
+    e.now += 1
+    e._maybe_lock()
+    check(len([p for p in b._pos if p.comment == "Basket Lock"]) == 1
+          and abs(e.cycle.get_meta("lock_initial_volume") - 0.34) < 1e-9,
+          "reintento aceptado: candado 0.34 puesto")
+
+
+def test_lock_split_by_volume_max():
+    """Neto 0.34 con volume_max 0.20 => dos ordenes (0.20 + 0.14), ambas LOCK, y
+    lock_initial_volume = 0.34 (suma de las patas)."""
+    from bot import ledger, strategy
+    e, b, log = _lock_eng()
+    b.volume_max = lambda: 0.20
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    e._maybe_lock()
+    check([round(o["lots"], 8) for o in b.orders] == [0.20, 0.14] and all(o["type"] == SELL for o in b.orders),
+          f"dos ordenes SELL 0.20 + 0.14 (got {b.orders})")
+    locks = [p for p in b._pos if p.comment == "Basket Lock"]
+    check(len(locks) == 2 and all(e.cycle.role_of(p.ticket) == ledger.ROLE_LOCK for p in locks),
+          "las dos patas son LOCK en el ledger")
+    check(abs(e.cycle.get_meta("lock_initial_volume") - 0.34) < 1e-9, "lock_initial_volume = 0.34")
+    check(abs(survival.net_lots(b.positions())) < 1e-9, "neto propio 0")
+    check(e._lock_state(b.positions()) == strategy.LOCK_FROZEN, "CONGELADO")
+    check(sum(1 for t, m in log.events if t == "PROTECCION" and "Candado puesto: 0.34 lotes SELL" in m) == 1,
+          "un solo log 'Candado puesto: 0.34'")
+    # Segunda pata rechazada: la primera queda registrada y el fallo se reporta.
+    e, b, log = _lock_eng()
+    b.volume_max = lambda: 0.20
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.34, 4000.0, "SMC Buy Entry")
+    e.cycle.sync(b.positions())
+    orig_mo = b.market_order
+    n = {"i": 0}
+
+    def second_rejected(otype, lots, comment, sl=0.0, tp=0.0):
+        n["i"] += 1
+        if n["i"] == 2:
+            class R:
+                retcode = 10006
+                order = 0
+            return R()
+        return orig_mo(otype, lots, comment, sl, tp)
+    b.market_order = second_rejected
+    e._maybe_lock()
+    check(abs(e.cycle.get_meta("lock_initial_volume") - 0.20) < 1e-9
+          and any(t == "ERROR" and "Candado FALLIDO (10006)" in m for t, m in log.events),
+          "2.a pata rechazada: initial_volume 0.20 (solo lo abierto) y ERROR")
+
+
+def test_dissolve_lock_initial_volume_fallback():
+    """Sin meta lock_initial_volume la disolucion usa el volumen LOCK vivo como base de la
+    fraccion: X = floor(0.34 * 0.30) = 0.10 (no el minimo 0.01)."""
+    e, b, log = _dissolve_setup()
+    e.cycle.set_meta("lock_initial_volume", None)
+    check(e.cycle.get_meta("lock_initial_volume") is None, "meta lock_initial_volume ausente")
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(3, 0.10), (5, 0.10)],
+          f"fallback al volumen LOCK vivo 0.30 => X=0.10 (got {b.partials})")
+    # Con meta distinta la fraccion se calcula sobre ella (la meta manda sobre el volumen vivo).
+    e, b, log = _dissolve_setup()
+    e.cycle.set_meta("lock_initial_volume", 0.60)
+    e._maybe_dissolve()
+    check([(x["ticket"], round(x["lots"], 8)) for x in b.partials] == [(5, 0.18)] and 3 not in {p.ticket for p in b.positions()},
+          f"meta 0.60 => X = 0.20 acotado por Op3 0.18 (Op3 se cierra entera; got {b.partials})")
+
+
+def test_lock_to_orphan_degradation_logged():
+    """Ledger.sync: una pata LOCK sin ciclo vivo se degrada a ORPHAN y lo deja en el log LEDGER;
+    con un ciclo vivo (ENTRY) NO se degrada ni se loguea."""
+    from bot import ledger
+    e, b, log = _lock_eng()
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.30, 4000.0, "Basket Lock")
+    e.cycle.sync(b.positions())
+    e.cycle.sync(b.positions())
+    check(e.cycle.role_of(5) != ledger.ROLE_LOCK, f"sin ciclo vivo la pata deja de ser LOCK (got {e.cycle.role_of(5)})")
+    msgs = [m for t, m in log.events if t == "LEDGER" and "Candado sin ciclo vivo: degradado a ORPHAN" in m]
+    check(len(msgs) >= 1, f"log LEDGER de la degradacion LOCK->ORPHAN (got {log.events})")
+    e, b, log = _lock_eng()
+    _pos(b, 1, mt5.POSITION_TYPE_BUY, 0.30, 4000.0, "SMC Buy Entry")
+    _pos(b, 5, mt5.POSITION_TYPE_SELL, 0.30, 4000.0, "Basket Lock")
+    e.cycle.sync(b.positions())
+    e.cycle.sync(b.positions())
+    check(e.cycle.role_of(5) == ledger.ROLE_LOCK
+          and not any("degradado a ORPHAN" in m for _, m in log.events),
+          "con ENTRY viva el candado sigue LOCK y no hay log de degradacion")
+
+
+LOTE3 = [
+    test_fit_margin_route,
+    test_fit_other_bot_s_branch,
+    test_fit_budget_relog,
+    test_fit_below_volume_min,
+    test_trailing_uses_move_usd_thresholds,
+    test_ref_lot_fallback_without_meta,
+    test_risk_hour_blocks_recovery_in_tick,
+    test_lock_send_rejected_after_order_check,
+    test_lock_split_by_volume_max,
+    test_dissolve_lock_initial_volume_fallback,
+    test_lock_to_orphan_degradation_logged,
+]
+
+
 def main():
     test_survival_math()
     test_fit_dynamic()
@@ -1915,6 +2256,8 @@ def main():
     for t in LOTE1:
         t()
     for t in LOTE2:
+        t()
+    for t in LOTE3:
         t()
     print("\ntest_supervivencia: TODO OK")
 

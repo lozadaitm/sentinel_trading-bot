@@ -973,6 +973,60 @@ def run():
     check("M5: 2.a lectura en otro tick => dead + CRITICA",
           e24.dead and len(sent24) == 1 and "CRITICA" in sent24[0], str(sent24))
 
+    # ---------- 25. Lote 3: M5 llama a surv.fit y respeta su resultado ----------
+    print("\n[25] Lote 3: el M5 pasa por surv.fit")
+    for fit_ret in (0.0, 0.03):
+        b25, lg25 = FakeBroker(), FakeLogger()
+        b25._price = float(df22["close"].iloc[-1])
+        e25 = TestEngine(b25, lg25, df22, series(**UP_M15)); e25.cfg = {}
+        calls25 = []
+
+        def fake_fit25(otype, lots, label, calls=calls25, ret=fit_ret):
+            calls.append((otype, lots, label))
+            return ret
+        e25.surv.fit = fake_fit25
+        e25.on_tick()
+        check("M5: llama a surv.fit(BUY, lote>0.03, 'Scalp M5') una vez (fit=%.2f)" % fit_ret,
+              len(calls25) == 1 and calls25[0][0] == mt5.ORDER_TYPE_BUY and calls25[0][2] == "Scalp M5"
+              and calls25[0][1] > 0.03, str(calls25))
+        if fit_ret == 0.0:
+            check("M5: fit devuelve 0 => no abre", len(b25.orders) == 0, str(b25.orders))
+        else:
+            check("M5: fit devuelve 0.03 => la orden sale con 0.03",
+                  len(b25.orders) == 1 and abs(b25.orders[0]["lots"] - 0.03) < 1e-9, str(b25.orders))
+
+    # ---------- 26. Lote 3: rescate L2 bloqueado por SUPERVIVENCIA (positivo del fixture [16]) ----------
+    print("\n[26] Lote 3: rescate bloqueado por supervivencia (sin noticias)")
+
+    def rescue_fixture(cfg):
+        br_, lg_ = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+        er_ = m15_engine(br_, lg_)
+        er_.cfg = cfg
+        er_.now = 1_700_050_000
+        er_.atr0, er_.rsi0, er_.struct_h4 = 2.0, 75.0, 0
+        br_._price = 4000.0
+        er_.cycle.set_meta("ref_lot", 0.20)
+        legs_ = []
+        for i in range(3):
+            p_ = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.20, 3990.0,
+                         1_700_000_000 + i, "SMC Sell Entry", config.MAGIC_M15)
+            p_.profit = -115.0
+            br_._pos.append(p_)
+            legs_.append(p_)
+        return br_, lg_, er_, legs_
+    # Sin override de survival_move_usd: el neto SELL 0.60 excede el aguante (n_max 0.29) => bloqueado.
+    brs, lgs, ers, legs_s = rescue_fixture({"news_enforce": True})
+    ers._check_rescue(legs_s)
+    check("M15: rescate L2 bloqueado por supervivencia (sin noticias)", len(brs.orders) == 0, str(brs.orders))
+    bud = [m for t, m in lgs.events if t == "BUDGET" and "bloqueada por tope de supervivencia" in m]
+    check("...y el bloqueo es el BUDGET de supervivencia, no otro gate", len(bud) == 1, str(lgs.events))
+    check("...sin evento NOTICIAS (no fue el bloqueo de noticias)",
+          not [1 for t, m in lgs.events if t == "NOTICIAS"], str(lgs.events))
+    # Control: con survival_move_usd bajo el mismo escenario SI abre el rescate (el gate es lo que bloquea).
+    brc, lgc, erc, legs_c = rescue_fixture({"news_enforce": True, "survival_move_usd": 1.0})
+    erc._check_rescue(legs_c)
+    check("control: con survival_move_usd=1 el mismo rescate SI abre", len(brc.orders) == 1, str(brc.orders))
+
     print("\n" + "=" * 60)
     if fails:
         print("FALLOS (%d): %s" % (len(fails), fails))
