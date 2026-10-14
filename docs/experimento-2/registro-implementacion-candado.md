@@ -85,3 +85,23 @@ Task 10: complete (commits 79ccfb4..d30847f, review clean)
 Final review: 1 Critical, 2 Important, 7 minors selected for the single fix wave (see final-findings.md). Deferred-only (can wait): unlock delta_margin 0; R6 orphan-promotion edge; [so magic filter to verify on demo; healer budget counting dissolved lock profits (conscious: de-risks); rollback prose.
 Final fix wave: complete (commits d30847f..35cbd39, re-review: all 10 addressed, no new Critical/Important)
 Residual (surface to user): M5 margin_level()=0.0 on failed account_info + code default ml_flatten 250 -> one bad read could flatten M5 scalps; migration 010 sets m5 ml_flatten=0 in DB, so neutralized once migration is applied. sim_broker.py (backtest harness) lacks new broker methods (pre-existing).
+
+## Ronda de menores (2026-10-14)
+
+Plan: [`menores-candado-correcciones.md`](menores-candado-correcciones.md), aprobado por el usuario en chat. Cada lote revisado por un subagente independiente.
+
+- Lote 1 (A1, A5, A6, A7): 0005aae, 06b3d83, e10fd30 — revisión aprobada.
+  - Ruling R17: el sender real avisa por `on_fail` de los fallos de red/HTTP; el aviso puede reintentarse (pausa de 60 s).
+  - Ruling R18: falta de API key o de destinatario = configuración permanente. Sin reintento: consume la espera de 6 h y se registra una vez.
+- Lote 2 (A2, A3, A4): 49af9a8, eeab904 — revisión aprobada.
+  - Ruling R19: "una pareja por día" significa una pareja *iniciada* por día UTC. Una deuda que termina en D+1 marca D.
+  - Ruling R20: la referencia de precio no se mueve tras un aflojado mixto o rechazado a medias. Sigue acotado por S ≥ 350 $.
+  - Ruling R21: un DONE_PARTIAL en la apertura del candado se registra como LOCK con su volumen real.
+- Lote 3 (pruebas B): 3068a03 — revisión aprobada.
+  - `reset_meta` con `core_count == 0` ya estaba cubierto.
+  - Ningún fallo real encontrado.
+- Lote 4 (limpieza C): 6a9f080 — autorrevisado.
+  - Las claves §5.9 de `survival.DEFAULTS` se usan y se conservan.
+  - `parse_hours` ya era tolerante; solo se añadieron pruebas.
+  - Excluido a propósito: `set_meta` sigue escribiendo en cada cambio.
+- Pendiente para la demo: verificar el filtro del magic en los deals `[so`.
