@@ -376,6 +376,13 @@ if ($DryRun) {
     exit 0
 }
 
+# Preparacion de terminales: fuerza Algo Trading en el config de cada clon y
+# avisa si la build del terminal no casa con la libreria MetaTrader5 (MT5 se
+# autoactualiza). restart_all ya mato los terminales, asi que lo leen al abrir.
+# Ver scripts/mt5_prep.py. Un fallo aqui no bloquea el lanzamiento.
+python -m scripts.mt5_prep
+if ($LASTEXITCODE -ne 0) { Write-Warn "mt5_prep fallo; se lanza igual (revisa Algo Trading a mano)." }
+
 # El Sentinel primero: es el senior del gobierno de margen y conviene que su
 # cesta ya este publicada cuando el M5 calcule la reserva de proteccion.
 foreach ($i in $aLanzar) {

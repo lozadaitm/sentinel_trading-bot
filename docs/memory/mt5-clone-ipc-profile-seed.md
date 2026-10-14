@@ -40,3 +40,5 @@ cada clon conserve su identidad y su botón de Algo Trading. Idempotente: si ya 
 **Prerequisito operativo:** el terminal base (`MT5_BASE_DIR`) debe haberse abierto e
 iniciado sesión al menos una vez para TENER perfil maduro que sembrar; si no, el
 provisioner avisa y el clon daría IPC timeout. Relacionado: [[private-signup-provisioning]].
+
+**Actualización 2026-10-14:** el provisioner corre como SYSTEM y no veía este perfil; ahora busca en `C:\Users\*` y usa la marca `sentinel_seeded.txt`. Ver [[mt5-updates-and-onboarding]].

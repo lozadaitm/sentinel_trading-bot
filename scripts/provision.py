@@ -30,6 +30,7 @@ Config por entorno:
 
 import argparse
 import datetime
+import glob
 import hashlib
 import os
 import shutil
@@ -109,29 +110,27 @@ def _find_supabase_creds():
 
 
 def _enable_algo_trading(clone_dir):
-    """Deja el Algo Trading (AutoTrading) habilitado desde el primer arranque.
+    """Deja el Algo Trading (AutoTrading) habilitado en el config del clon.
 
     En modo portable el terminal lee su configuracion de <clon>\\config\\
     common.ini. Sin el boton activo, mt5.order_send() devuelve retcode 10027
-    (client disables autotrading) y el bot puede leer pero no operar. Se
-    escribe la seccion [Experts] ANTES del primer arranque; si el archivo ya
-    existe (clon ya arrancado alguna vez) no se pisa: en ese caso el estado
-    del boton ya es el que dejo el operador.
+    (client disables autotrading) y el bot puede leer pero no operar. Se fuerza
+    [Experts] Enabled=1 conservando el resto del archivo: el terminal lo
+    reescribe y podia perderlo (alta del 2026-10-14). start_all lo vuelve a
+    forzar en cada arranque via scripts/mt5_prep.py.
     """
-    cfg_dir = os.path.join(clone_dir, "config")
-    ini_path = os.path.join(cfg_dir, "common.ini")
-    if os.path.exists(ini_path):
-        return
-    os.makedirs(cfg_dir, exist_ok=True)
-    with open(ini_path, "w", encoding="utf-16") as f:  # MT5 usa UTF-16 en sus .ini
-        f.write("[Experts]\nAllowLiveTrading=1\nAllowDllImport=0\nEnabled=1\n")
-    print("    Algo Trading habilitado (config/common.ini del clon).")
+    from scripts.mt5_prep import ensure_algo_trading
+    if ensure_algo_trading(os.path.join(clone_dir, "config", "common.ini")):
+        print("    Algo Trading habilitado (config/common.ini del clon).")
 
 
 # Ficheros del perfil ESPECIFICOS de la cuenta: cada clon conserva los suyos
 # (su almacen de cuentas y su common.ini con el boton de Algo Trading). El
 # resto del perfil base maduro se siembra tal cual.
 _ACCOUNT_LOCAL_FILES = {"accounts.dat", "common.ini"}
+
+# Marca de "perfil ya sembrado" dentro del config del clon.
+_SEED_MARKER = "sentinel_seeded.txt"
 
 
 def _base_runtime_config():
@@ -147,31 +146,51 @@ def _base_runtime_config():
     Devuelve <perfil>\\config del terminal base, o None si el base nunca se ha
     ejecutado interactivamente (no hay perfil maduro que sembrar).
     """
-    appdata = os.environ.get("APPDATA", "")
-    if not appdata:
-        return None
-    terminals = os.path.join(appdata, "MetaQuotes", "Terminal")
-    if not os.path.isdir(terminals):
-        return None
+    override = os.environ.get("MT5_BASE_PROFILE", "")
+    if override:
+        return override if os.path.isdir(override) else None
     base = os.path.normpath(MT5_BASE_DIR)
     # 1) Nombre canonico del perfil: MD5(ruta en MAYUSCULAS, UTF-16-LE).
     want = hashlib.md5(base.upper().encode("utf-16-le")).hexdigest().upper()
-    cand = os.path.join(terminals, want, "config")
-    if os.path.isdir(cand):
-        return cand
-    # 2) Fallback robusto: el perfil cuyo origin.txt apunta al base.
-    for name in os.listdir(terminals):
-        try:
-            with open(os.path.join(terminals, name, "origin.txt"), "rb") as f:
-                raw = f.read()
-        except OSError:
-            continue
-        origin = raw.decode("utf-16", "ignore").strip() or raw.decode("utf-8", "ignore").strip()
-        if os.path.normpath(origin).lower() == base.lower():
-            cfg = os.path.join(terminals, name, "config")
-            if os.path.isdir(cfg):
-                return cfg
+    for terminals in _terminal_profile_roots():
+        cand = os.path.join(terminals, want, "config")
+        if os.path.isdir(cand):
+            return cand
+        # 2) Fallback robusto: el perfil cuyo origin.txt apunta al base.
+        for name in os.listdir(terminals):
+            try:
+                with open(os.path.join(terminals, name, "origin.txt"), "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            origin = raw.decode("utf-16", "ignore").strip() or raw.decode("utf-8", "ignore").strip()
+            if os.path.normpath(origin).lower() == base.lower():
+                cfg = os.path.join(terminals, name, "config")
+                if os.path.isdir(cfg):
+                    return cfg
     return None
+
+
+def _terminal_profile_roots():
+    """Carpetas MetaQuotes\\Terminal donde buscar el perfil del base.
+
+    Primero la del usuario actual (%APPDATA%). El provisioner corre como SYSTEM
+    (tarea programada) y su %APPDATA% no tiene el perfil del operador: por eso
+    despues se recorren los perfiles de los usuarios de Windows
+    (MT5_USERS_ROOT, default C:\\Users -> <usuario>\\AppData\\Roaming).
+    """
+    roots = []
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        roots.append(os.path.join(appdata, "MetaQuotes", "Terminal"))
+    users = os.environ.get("MT5_USERS_ROOT", r"C:\Users")
+    roots += sorted(glob.glob(os.path.join(users, "*", "AppData", "Roaming",
+                                           "MetaQuotes", "Terminal")))
+    out = []
+    for r in roots:
+        if os.path.isdir(r) and os.path.normcase(r) not in [os.path.normcase(x) for x in out]:
+            out.append(r)
+    return out
 
 
 def _seed_ipc_profile(clone_dir):
@@ -180,16 +199,19 @@ def _seed_ipc_profile(clone_dir):
     Sin esto el clon conecta al broker pero su terminal no atiende el pipe IPC
     de Python y mt5.initialize() da (-10005, 'IPC timeout'). Ver
     _base_runtime_config(). Se excluyen los ficheros de cuenta para que cada
-    clon mantenga su login y su common.ini. Marca: si ya hay settings.ini el
-    perfil ya esta sembrado/maduro y NO se pisa (respeta ajustes del operador).
+    clon mantenga su login y su common.ini. Marca: _SEED_MARKER; si existe el
+    perfil ya se sembro y NO se pisa (respeta ajustes del operador). No se usa
+    settings.ini como marca: la copia de la instalacion base ya puede traerlo
+    sin estar sembrada (alta del 2026-10-14).
     """
     dst = os.path.join(clone_dir, "config")
-    if os.path.exists(os.path.join(dst, "settings.ini")):
+    if os.path.exists(os.path.join(dst, _SEED_MARKER)):
         return
     src = _base_runtime_config()
     if not src:
-        print("    [AVISO] el terminal base no tiene perfil de runtime maduro: "
-              "abrelo una vez e inicia sesion, o el clon dara IPC timeout.")
+        print("    [AVISO] NO se encontro el perfil de runtime maduro del terminal base "
+              "(ni en %APPDATA% ni en los perfiles de C:\\Users). Abre el base una vez "
+              "e inicia sesion, o define MT5_BASE_PROFILE; si no, el clon dara IPC timeout.")
         return
     os.makedirs(dst, exist_ok=True)
     copied = 0
@@ -205,6 +227,8 @@ def _seed_ipc_profile(clone_dir):
             copied += 1
         except OSError as e:  # noqa: BLE001
             print(f"    [AVISO] no se pudo sembrar {name}: {e}")
+    with open(os.path.join(dst, _SEED_MARKER), "w", encoding="utf-8") as f:
+        f.write(src + "\n")
     print(f"    perfil IPC sembrado desde el base ({copied} entradas).")
 
 
