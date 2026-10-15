@@ -127,6 +127,9 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     reentry_max_atr         DOUBLE PRECISION DEFAULT 1.0,
     reentry_enforce         BOOLEAN          DEFAULT false,
 
+    -- 13. Healer: perdedor real minimo, en $/oz (migracion 012)
+    healer_min_move_usd     DOUBLE PRECISION DEFAULT 2.0,
+
     UNIQUE (user_id, symbol)
 );
 

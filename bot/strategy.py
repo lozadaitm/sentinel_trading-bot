@@ -35,6 +35,7 @@ DEFAULTS = {
     "use_dynamic_retrace": True, "retrace_atr_mult": 0.1, "fixed_retrace": 2.0,
     "use_dynamic_hedge": True, "hedge_dist": 800, "hedge_atr_mult": 2.0,  # suelo 800 pt = 8 $ (spec 2026-10-15)
     "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
+    "healer_min_move_usd": 2.0,       # perdedor real: >= N $/oz en contra (spec 2026-10-16; 0 = cualquier rojo)
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
     "use_pullback": True, "atr_entry_distance": 2.5, "use_h4_struct": True,
     "entry_rsi_max": 75, "entry_rsi_min": 25,
@@ -127,6 +128,7 @@ class SentinelEngine:
         self.cycle_realized = 0.0            # B: P&L realizado del ciclo en curso (para el freeze del Unwind)
         self._healer_needs_rebaseline = True  # C: al iniciar ciclo, rebasa el cursor del Healer (presupuesto por ciclo)
         self._cover_protect_logged = False    # dedupe del aviso de cobertura protegida (1 por ciclo)
+        self.healer_budget = 0.0             # bolsa del Healer: 90% de lo ganado CON perdedor real (spec 2026-10-16)
         self.max_cycle_peak = 0.0
         self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
         self.spread_high = False      # cache del filtro de spread del tick actual
@@ -333,6 +335,7 @@ class SentinelEngine:
         self.cycle_realized = 0.0
         self._healer_needs_rebaseline = True
         self._cover_protect_logged = False
+        self.healer_budget = 0.0
         return True
 
     def _close_all(self, reason):
@@ -353,6 +356,7 @@ class SentinelEngine:
         self.cycle_realized = 0.0             # B: cierra el ciclo -> reinicia el realizado
         self._healer_needs_rebaseline = True  # C: el proximo ciclo rebasa el cursor del Healer
         self._cover_protect_logged = False
+        self.healer_budget = 0.0              # la bolsa es del ciclo
 
     # ==============================================================
     # Filtros de entrada
@@ -1392,12 +1396,33 @@ class SentinelEngine:
         if self._healer_needs_rebaseline:
             self.last_healed_ticket = max_ticket
             self._healer_needs_rebaseline = False
-            return  # este pass no ampu­ta: el presupuesto del ciclo arranca en cero
+            self.healer_budget = 0.0
+            return  # este pass no amputa: el presupuesto del ciclo arranca en cero
 
         if max_ticket > self.last_healed_ticket:
             self.last_healed_ticket = max_ticket
-        if budget > 0:
-            self._apply_healing(budget)
+
+        # Bolsa SOLO con perdedor real (spec 2026-10-16). Sin perdedor real, lo
+        # ganado queda como ganancia y nunca se gasta despues en curar; si habia
+        # bolsa (el perdedor se recupero o se cerro) se libera. El 14-oct se
+        # amputaba la recovery recien abierta (roja solo por spread) con lo que
+        # habia ganado la anterior.
+        if self._healer_target(self.b.positions())[0] is None:
+            thr = float(self._p("healer_min_move_usd"))
+            if budget > 0:
+                self.log.write("HEALER", f"Healer: ganancia {budget:.2f} $ sin perdedor real "
+                                         f"(>= {thr:.2f} $/oz): queda como ganancia.",
+                               balance=self.b.account_balance())
+            if self.healer_budget > 0:
+                self.log.write("HEALER", f"Healer: bolsa {self.healer_budget:.2f} $ liberada "
+                                         f"(ya no hay perdedor real).",
+                               balance=self.b.account_balance())
+            self.healer_budget = 0.0
+            return
+        self.healer_budget += 0.90 * budget
+        if self.healer_budget > 0:
+            spent = self._apply_healing(self.healer_budget)
+            self.healer_budget = max(0.0, self.healer_budget - spent)
 
     def _closing_increases_exposure(self, p):
         """True si cerrar `p` AUMENTA la exposicion neta absoluta de la cesta.
@@ -1411,8 +1436,11 @@ class SentinelEngine:
         contrib = p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
         return abs(net - contrib) > abs(net)
 
-    def _apply_healing(self, profit_available):
-        """Amputa parcialmente el peor leg AMPUTABLE con el presupuesto disponible.
+    def _healer_target(self, positions):
+        """Peor PERDEDOR REAL amputable: (pos, money) o (None, 0.0).
+
+        Perdedor real = amputable y con perdida (profit + swap) >= healer_min_move_usd
+        por onza; una pata roja solo por spread no lo es (spec 2026-10-16).
 
         Proteccion de la cobertura: mientras el P&L total del ciclo siga en
         negativo, se excluyen los legs cuyo cierre aumentaria la exposicion neta.
@@ -1434,7 +1462,6 @@ class SentinelEngine:
         """
         protect_cover = (self.cycle_realized + self._basket_net_profit()) <= 0
 
-        positions = self.b.positions()
         # Rol: los miembros de un par intacto (ENTRY<->HEDGE, huerfano<->cover)
         # son intocables mientras el ciclo siga en rojo. La regla estructural
         # de abajo no basta sola: con N recoveries del lado de la ENTRY, cerrar
@@ -1446,10 +1473,12 @@ class SentinelEngine:
         # disolucion o un cierre total), independiente de protect_cover.
         pair_frozen |= {p.ticket for p in self.cycle.lock_legs(positions)}
 
+        min_move = float(self._p("healer_min_move_usd"))
+        contract = self.b.contract_size()
         # Peor leg por DINERO REAL = profit + swap (antes solo miraba p.profit e
         # ignoraba el swap acumulado, que en holds largos puede ser material).
         worst = None
-        worst_money = 1e9
+        worst_money = 0.0
         cover_skipped = 0
         for p in positions:
             if p.ticket in pair_frozen:
@@ -1459,7 +1488,11 @@ class SentinelEngine:
                 cover_skipped += 1
                 continue
             money = p.profit + p.swap
-            if money < worst_money:
+            if money >= 0 or p.volume <= 0:
+                continue
+            if -money / (p.volume * contract) < min_move - 1e-9:
+                continue   # rojo de spread/ruido: no es perdedor real
+            if worst is None or money < worst_money:
                 worst_money = money
                 worst = p
 
@@ -1470,48 +1503,57 @@ class SentinelEngine:
                 f"amputacion mientras el ciclo siga en negativo.",
                 balance=self.b.account_balance())
             self._cover_protect_logged = True
+        return worst, worst_money
 
-        if worst is None or worst_money >= 0 or worst.volume <= 0:
-            return
+    def _apply_healing(self, bolsa):
+        """Amputa parcialmente el peor perdedor real con la bolsa (ya al 90%).
+
+        Devuelve lo gastado (la perdida realizada, positiva) o 0.0 si no amputa.
+        Cada ganancia que llega mientras la pata pierde le recorta un trozo.
+        """
+        worst, worst_money = self._healer_target(self.b.positions())
+        if worst is None:
+            return 0.0
 
         # Costo real por lote = P&L (precio + swap) prorrateado por volumen. Es exacto
         # porque el P&L de la posicion escala lineal con el volumen (mismo precio de
         # apertura); reemplaza al calculo por diff_points, que no consideraba swap.
         cost_per_lot = -worst_money / worst.volume
         min_lot = self.b.volume_min()
-        cost_of_min_lot = cost_per_lot * min_lot
-        if cost_of_min_lot > profit_available:
-            return  # ni el lote minimo cabe en el presupuesto disponible
+        if cost_per_lot * min_lot > bolsa:
+            return 0.0  # ni el lote minimo cabe: la bolsa espera
 
-        budget = profit_available * 0.90
-        lots_to_close = budget / cost_per_lot
         import math
         vol_step = self.b.volume_step()
-        lots_to_close = math.floor(lots_to_close / vol_step) * vol_step
-        if lots_to_close > worst.volume:
-            lots_to_close = worst.volume  # no cerrar mas de lo abierto
+        lots_to_close = math.floor(bolsa / cost_per_lot / vol_step + 1e-9) * vol_step
+        lots_to_close = round(min(lots_to_close, worst.volume), 8)  # no cerrar mas de lo abierto
+        if lots_to_close < min_lot - 1e-9:
+            return 0.0
 
-        if lots_to_close >= min_lot:
-            vol_before = worst.volume  # captura antes: close_partial puede dejar worst.volume=0
-            # Identidad de la operacion amputada, capturada ANTES del cierre para
-            # dejar constancia en el log de a que leg se le aplico la amputacion.
-            op_side = "BUY" if worst.type == mt5.POSITION_TYPE_BUY else "SELL"
-            op_desc = worst.comment or "sin comentario"
-            op_ticket = worst.ticket
-            op_open = worst.price_open
-            res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
-            if res is None or getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
-                # B: registra la perdida realizada (incl. swap, prorrateada por el
-                # volumen cerrado) en el acumulado del ciclo, para que el freeze del
-                # Unwind la tenga en cuenta y la amputacion NO levante el neto flotante
-                # abriendo la cobertura (cascade). Ver docs/memory: healer-unwind-hedge-cascade.
-                frac = lots_to_close / vol_before
-                self.cycle_realized += worst_money * frac
-                self.log.write(
-                    "HEALER",
-                    f"Amputacion Tactica sobre {op_side} '{op_desc}' (ticket #{op_ticket}) "
-                    f"abierta @ {op_open:.2f}. Lotes amputados: {lots_to_close:.2f}",
-                    worst_money, budget, self.b.account_balance(), ticket=op_ticket)
+        vol_before = worst.volume  # captura antes: close_partial puede dejar worst.volume=0
+        # Identidad de la operacion amputada, capturada ANTES del cierre para
+        # dejar constancia en el log de a que leg se le aplico la amputacion.
+        op_side = "BUY" if worst.type == mt5.POSITION_TYPE_BUY else "SELL"
+        op_desc = worst.comment or "sin comentario"
+        op_ticket = worst.ticket
+        op_open = worst.price_open
+        res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
+        if res is not None and getattr(res, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+            return 0.0
+        # B: registra la perdida realizada (incl. swap, prorrateada por el
+        # volumen cerrado) en el acumulado del ciclo, para que el freeze del
+        # Unwind la tenga en cuenta y la amputacion NO levante el neto flotante
+        # abriendo la cobertura (cascade). Ver docs/memory: healer-unwind-hedge-cascade.
+        frac = lots_to_close / vol_before
+        self.cycle_realized += worst_money * frac
+        spent = -worst_money * frac
+        self.log.write(
+            "HEALER",
+            f"Amputacion Tactica sobre {op_side} '{op_desc}' (ticket #{op_ticket}) "
+            f"abierta @ {op_open:.2f}. Lotes amputados: {lots_to_close:.2f}. "
+            f"Bolsa restante: {max(0.0, bolsa - spent):.2f} $",
+            worst_money, bolsa, self.b.account_balance(), ticket=op_ticket)
+        return spent
 
     # ==============================================================
     # PROFIT BANKING (Unwind)

@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     use_healer              BOOLEAN          DEFAULT true,
     healer_balance_bias     BOOLEAN          DEFAULT true,
     healer_min_core         INTEGER          DEFAULT 3,
+    healer_min_move_usd     DOUBLE PRECISION DEFAULT 2.0,
     use_unwind_mode         BOOLEAN          DEFAULT true,
     unwind_atr_mult         DOUBLE PRECISION DEFAULT 2.0,
     unwind_money_floor      DOUBLE PRECISION DEFAULT 30.0,

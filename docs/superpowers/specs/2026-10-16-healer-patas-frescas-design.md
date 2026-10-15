@@ -1,6 +1,6 @@
 # Diseño: el Healer no amputa patas recién abiertas; bolsa solo con perdedor real
 
-**Estado:** PROPUESTA v2, pendiente de aprobación del usuario.
+**Estado:** APROBADO por el usuario el 2026-10-16 (v2).
 - v1: bolsa del ciclo que espera aunque no haya a quién curar.
 - v2, acordada con el usuario el 2026-10-16: la bolsa **solo existe mientras haya un perdedor real amputable**. Lo ganado sin perdedor queda como ganancia.
 
