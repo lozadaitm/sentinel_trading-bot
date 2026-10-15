@@ -44,6 +44,6 @@ cosas a la vez y los 12 bots quedaron caídos ~45 min (sin daño: las cuentas es
 
 **Pendiente de mantenimiento (fin de semana tras el 2026-10-14):**
 - `pip install MetaTrader5` de la build de los terminales (6230 → librería 6231; hoy está la 6090).
-- `restart_all` para cargar el fix de inactividad (a2f07d7).
-- Verificar en Supabase que 26275217/21/22 vuelven a RUNNING.
+- `restart_all` tras actualizar la librería; verificar en Supabase que 26275217/21/22 vuelven a RUNNING.
+  (El fix de inactividad a2f07d7 ya se cargó con el reinicio del 2026-10-15.)
 - Luego, revisión de los primeros días del candado (tiempo CONGELADO, re-candados, coste de rebotes falsos, avisos).

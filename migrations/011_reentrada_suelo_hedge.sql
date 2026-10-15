@@ -17,7 +17,7 @@
 --   3. Valores vigentes (solo filas con el valor viejo; no pisa personalizados).
 --   4. Bloque ROLLBACK (comentado).
 --
--- ESTADO: PENDIENTE de aplicar en Supabase (SQL Editor). Idempotente.
+-- ESTADO: APLICADA en Supabase el 2026-10-15 (SQL Editor). Idempotente.
 -- ==================================================================
 
 -- ---- 1. Columnas nuevas ------------------------------------------

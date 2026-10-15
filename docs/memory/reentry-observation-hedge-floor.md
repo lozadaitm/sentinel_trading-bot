@@ -37,3 +37,5 @@ Decisión del usuario (2026-10-15), migración `011_reentrada_suelo_hedge.sql`, 
 - Si las lejanas siguen siendo la cola mala, proponer `reentry_enforce=true`.
 - Análisis completo en `docs/experimento-2/analisis-notas-usuario-2026-10-15.md`.
 - Ver [[survival-cap-basket-lock]].
+
+**Despliegue:** migración 011 aplicada y `restart_all` hecho el 2026-10-15 ~20:55 UTC (con un ciclo abierto en las 3 cuentas; el ledger lo retomó sin problemas). La observación cuenta desde esa fecha.
