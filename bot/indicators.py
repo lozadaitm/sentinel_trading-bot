@@ -204,3 +204,37 @@ def check_m15_breakout(df_m15):
     if lo_f > 0 and c1 < lo_f:
         return -1
     return 0
+
+
+def m15_breakout_level(df_m15):
+    """Como check_m15_breakout, pero devuelve tambien el nivel roto -> (signal, level).
+
+    Misma busqueda de fractales (shifts 3..29). level = fractal superior roto
+    (signal 1), inferior roto (signal -1) o 0.0 sin ruptura. Solo lectura: lo
+    usa el M15 para identificar la ruptura de cada OP1 (re-entradas).
+    """
+    highs = df_m15["high"].values
+    lows = df_m15["low"].values
+    closes = df_m15["close"].values
+    up = _up_fractals(highs)
+    dn = _down_fractals(lows)
+
+    up_f = lo_f = 0.0
+    for i in range(3, 30):
+        u = _frac_at_shift(up, i)
+        l = _frac_at_shift(dn, i)
+        if up_f == 0 and u > 0:
+            up_f = u
+        if lo_f == 0 and l > 0:
+            lo_f = l
+        if up_f > 0 and lo_f > 0:
+            break
+
+    if len(closes) < 2:
+        return 0, 0.0
+    c1 = closes[-2]
+    if up_f > 0 and c1 > up_f:
+        return 1, float(up_f)
+    if lo_f > 0 and c1 < lo_f:
+        return -1, float(lo_f)
+    return 0, 0.0

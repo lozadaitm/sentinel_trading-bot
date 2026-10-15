@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
 
     -- 3. Cobertura (Sentinel)
     use_dynamic_hedge       BOOLEAN          DEFAULT true,
-    hedge_dist              INTEGER          DEFAULT 350,
+    hedge_dist              INTEGER          DEFAULT 800,
     hedge_atr_mult          DOUBLE PRECISION DEFAULT 2.0,
 
     -- 4. Healer inteligente

@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
 
     -- 3. Cobertura (Sentinel)
     use_dynamic_hedge       BOOLEAN          DEFAULT true,
-    hedge_dist              INTEGER          DEFAULT 350,
+    hedge_dist              INTEGER          DEFAULT 800,
     hedge_atr_mult          DOUBLE PRECISION DEFAULT 2.0,
 
     -- 4. Healer inteligente
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     survival_move_usd       DOUBLE PRECISION DEFAULT 350.0,
     lock_trigger_usd        DOUBLE PRECISION DEFAULT 150.0,
     unlock_rebound_usd      DOUBLE PRECISION DEFAULT 50.0,
-    risk_hours_utc          TEXT             DEFAULT '1,13,14,15',
+    risk_hours_utc          TEXT             DEFAULT '1',
     lock_dissolve_after_h   DOUBLE PRECISION DEFAULT 24,
     lock_dissolve_fraction  DOUBLE PRECISION DEFAULT 0.34,
     lock_dissolve_hours_utc TEXT             DEFAULT '3,4',
@@ -121,6 +121,11 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     rescue_l2_move_usd      DOUBLE PRECISION DEFAULT 16.7,
     rescue_l3_move_usd      DOUBLE PRECISION DEFAULT 44.4,
     news_enforce            BOOLEAN          DEFAULT true,
+
+    -- 12. Re-entradas + horas de riesgo en hora de Nueva York (migracion 011)
+    risk_hours_ny           TEXT             DEFAULT '9,10,11',
+    reentry_max_atr         DOUBLE PRECISION DEFAULT 1.0,
+    reentry_enforce         BOOLEAN          DEFAULT false,
 
     UNIQUE (user_id, symbol)
 );

@@ -23,7 +23,8 @@ DEFAULTS = {
     "survival_move_usd": 350.0,     # aguante minimo exigido (USD por onza)
     "lock_trigger_usd": 150.0,      # S bajo el cual se pone el candado
     "unlock_rebound_usd": 50.0,     # rebote que afloja el candado
-    "risk_hours_utc": "1,13,14,15",
+    "risk_hours_utc": "1",          # horas de riesgo fijas en UTC (sesion asiatica, sin DST)
+    "risk_hours_ny": "9,10,11",     # horas de riesgo en hora de Nueva York (siguen su DST)
     "lock_dissolve_after_h": 24,
     "lock_dissolve_fraction": 0.34,
     "lock_dissolve_hours_utc": "3,4",
@@ -82,6 +83,15 @@ def utc_hour_from_server(ts):
     end = datetime.datetime(y, 11, _nth_sunday(y, 11, 1), 2)
     off = 3 if start <= wall < end else 2
     return ((int(ts) - off * 3600) // 3600) % 24
+
+
+def ny_hour_from_server(ts):
+    """Hora local de Nueva York (0-23) desde un timestamp de hora de servidor.
+
+    El servidor va SIEMPRE a Nueva York + 7 h (ver utc_hour_from_server), asi
+    que no hace falta calcular el DST: sigue solo el cambio de hora de NY.
+    """
+    return ((int(ts) - 7 * 3600) // 3600) % 24
 
 
 class _Snap:

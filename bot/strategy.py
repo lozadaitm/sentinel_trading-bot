@@ -33,7 +33,7 @@ DEFAULTS = {
     "base_risk": 5000.0, "base_lots": 0.12, "max_entry_lots": 0.0, "max_recovery_lots": 0.0,  # 0 = sin tope fijo (manda el de supervivencia)
     "use_basket_close": True, "basket_percent": 0.15, "commission_per_lot": 6.0,
     "use_dynamic_retrace": True, "retrace_atr_mult": 0.1, "fixed_retrace": 2.0,
-    "use_dynamic_hedge": True, "hedge_dist": 350, "hedge_atr_mult": 2.0,
+    "use_dynamic_hedge": True, "hedge_dist": 800, "hedge_atr_mult": 2.0,  # suelo 800 pt = 8 $ (spec 2026-10-15)
     "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
     "use_pullback": True, "atr_entry_distance": 2.5, "use_h4_struct": True,
@@ -66,6 +66,9 @@ DEFAULTS = {
     "margin_cap_pct": 60.0,           # techo de margen propio, en % del equity
     "ml_no_add": 200.0,               # bajo este margin level no se abren aditivas (el hedge sigue)
     "ml_flatten": 0.0,                # el senior nunca se auto-liquida: lo hace el M5
+    # --- Re-entradas sobre la misma ruptura (spec 2026-10-15-reentrada-y-suelo-hedge) ---
+    "reentry_max_atr": 1.0,           # re-entrada "lejana" si el precio esta a > N*ATR del nivel roto (0 = apagado)
+    "reentry_enforce": False,         # False = solo observacion (abre y loguea); True = no abre la lejana
 }
 # Tope de supervivencia y umbrales en movimiento (bot/survival.py): solo se
 # anaden las claves que este motor no define (equity_weight mantiene su 0.80).
@@ -155,6 +158,9 @@ class SentinelEngine:
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
+        self._last_entry_signal = None    # (lado, nivel roto, ordinal) de la ultima OP1 confirmada
+        self._reentry_block_logged = None # (lado, nivel) ya logueado como frenado (1 vez por senal)
+        self._last_open_ticket = 0        # ticket de la ultima apertura confirmada (_register_open)
 
         # Buffers del tick actual (rellenados por _compute_buffers)
         self.now = 0
@@ -252,10 +258,13 @@ class SentinelEngine:
         return self.struct_h4 <= 0
 
     def _risk_hour(self):
-        """True si la hora UTC actual esta en `risk_hours_utc` (aperturas aditivas
-        de rescate/recovery bloqueadas; hedge y gestion nunca se bloquean)."""
-        hours = survival.parse_hours(str(self._p("risk_hours_utc")))
-        return survival.utc_hour_from_server(self.now) in hours
+        """True si la hora actual esta en `risk_hours_utc` (hora UTC) o en
+        `risk_hours_ny` (hora de Nueva York, sigue su cambio de hora). En hora de
+        riesgo se bloquean recovery/rescate y el aflojado; hedge y gestion no."""
+        utc = survival.parse_hours(str(self._p("risk_hours_utc")))
+        ny = survival.parse_hours(str(self._p("risk_hours_ny")))
+        return (survival.utc_hour_from_server(self.now) in utc
+                or survival.ny_hour_from_server(self.now) in ny)
 
     # ==============================================================
     # Lotaje y cierre total
@@ -432,7 +441,8 @@ class SentinelEngine:
             return False
         ok = (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL) if accept_partial             else (mt5.TRADE_RETCODE_DONE,)
         if getattr(res, "retcode", None) in ok:
-            self.cycle.register(getattr(res, "order", 0), role, covers=covers)
+            self._last_open_ticket = getattr(res, "order", 0)
+            self.cycle.register(self._last_open_ticket, role, covers=covers)
             return True
         return False
 
@@ -1116,6 +1126,63 @@ class SentinelEngine:
             self.cycle.set_meta("rescue_opened", int(self.cycle.get_meta("rescue_opened", 0)) + 1)
         return True
 
+    def _reentry_info(self, side):
+        """(nivel roto, ordinal, distancia en ATR) de una OP1 de `side` (+1/-1).
+
+        Ordinal: 1 si es una ruptura nueva; N+1 si repite (lado, nivel) de la
+        ultima OP1 confirmada (re-entrada sobre la misma ruptura). Sin nivel
+        identificable (datos cortos o senal distinta) cuenta como ruptura nueva.
+        """
+        try:
+            sig, level = indicators.m15_breakout_level(self.df_m15)
+        except Exception:  # noqa: BLE001  (solo identifica; nunca rompe la entrada)
+            sig, level = 0, 0.0
+        if sig != side or level <= 0:
+            return 0.0, 1, 0.0
+        prev = self._last_entry_signal
+        n = 1
+        if prev and prev[0] == side and abs(prev[1] - level) <= self.b.point() / 2:
+            n = prev[2] + 1
+        dist = (self.b.ask() - level) if side == 1 else (level - self.b.bid())
+        return level, n, dist / self._effective_atr()
+
+    def _open_entry(self, order_type, lots, comment, label):
+        """Apertura de OP1 con el control de re-entradas sobre la misma ruptura.
+
+        Una re-entrada (misma ruptura que la OP1 anterior) a mas de
+        reentry_max_atr * ATR del nivel roto es "lejana": con reentry_enforce
+        no se abre (log 1 vez por senal); sin el, se abre igual y se anota con
+        su ticket para evaluarla despues (modo observacion).
+        """
+        side = 1 if order_type == mt5.ORDER_TYPE_BUY else -1
+        level, n, dist_atr = self._reentry_info(side)
+        max_atr = float(self._p("reentry_max_atr"))
+        far = level > 0 and n > 1 and max_atr > 0 and dist_atr > max_atr
+        if far and self._p("reentry_enforce"):
+            key = (side, round(level, 5))
+            if self._reentry_block_logged != key:
+                self._reentry_block_logged = key
+                self.log.write(
+                    "SYSTEM",
+                    f"Re-entrada frenada: precio a {dist_atr:.2f} ATR del nivel {level:.2f} "
+                    f"(max {max_atr:.2f} ATR).",
+                    self.b.ask() if side == 1 else self.b.bid(), lots, self.b.account_balance())
+            return False
+        if not self._open_additive(order_type, lots, comment, ledger.ROLE_ENTRY, label):
+            return False
+        if level > 0:
+            self._last_entry_signal = (side, level, n)
+        if level > 0 and n > 1 and max_atr > 0:
+            kind = "lejana" if far else "cercana"
+            tail = " Se abre igual." if far else ""
+            self.log.write(
+                "SYSTEM",
+                f"Re-entrada {kind} (observacion): {n}.a entrada sobre el nivel {level:.2f}, "
+                f"a {dist_atr:.2f} ATR (umbral {max_atr:.2f}).{tail}",
+                self.b.ask() if side == 1 else self.b.bid(), lots, self.b.account_balance(),
+                ticket=self._last_open_ticket)
+        return True
+
     def _resize_hedge(self, entry, hedge):
         """Encoge el hedge al volumen remanente de la ENTRY (nunca lo agranda).
 
@@ -1204,6 +1271,15 @@ class SentinelEngine:
             gates.append(("Estructura H4", _struct_txt(struct_h4), "definida", struct_h4 != 0))
             gates.append(("RSI (M15)", f"{rsi:.1f}", "25 .. 75", 25 < rsi < 75))
             otype = mt5.ORDER_TYPE_BUY
+
+        if side in ("BUY", "SELL") and float(self._p("reentry_max_atr")) > 0:
+            level, n, dist_atr = self._reentry_info(1 if side == "BUY" else -1)
+            if level > 0 and n > 1:
+                rmax = float(self._p("reentry_max_atr"))
+                mode = "ACTIVO" if self._p("reentry_enforce") else "OBS"
+                far = dist_atr > rmax
+                gates.append((f"Re-entrada ({mode})", f"{n}.a a {dist_atr:.2f} ATR",
+                              f"<= {rmax:.2f} ATR", not (far and self._p("reentry_enforce"))))
 
         lots = self._calculate_lots(False)
         margin_ok = self.gov.probe(lots, otype, budget.KIND_ADDITIVE)
@@ -2021,12 +2097,10 @@ class SentinelEngine:
             lots = self._calculate_lots(False)
             if struct_h4 >= 0 and signal_m15 == 1 and self._is_price_good_entry(mt5.ORDER_TYPE_BUY):
                 if self.rsi0 < int(self._p("entry_rsi_max")):
-                    self._open_additive(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry",
-                                        ledger.ROLE_ENTRY, "OP1 BUY")
+                    self._open_entry(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry", "OP1 BUY")
             elif struct_h4 <= 0 and signal_m15 == -1 and self._is_price_good_entry(mt5.ORDER_TYPE_SELL):
                 if self.rsi0 > int(self._p("entry_rsi_min")):
-                    self._open_additive(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry",
-                                        ledger.ROLE_ENTRY, "OP1 SELL")
+                    self._open_entry(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry", "OP1 SELL")
 
         # --- ESTADO 2: RECOVERY (ciclo = OP1 + hedge) ---
         elif cycle_count == 2:
