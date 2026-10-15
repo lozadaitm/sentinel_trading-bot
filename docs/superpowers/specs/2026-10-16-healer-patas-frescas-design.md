@@ -1,6 +1,8 @@
-# Diseño: el Healer no amputa patas recién abiertas y no pierde su presupuesto
+# Diseño: el Healer no amputa patas recién abiertas; bolsa solo con perdedor real
 
-**Estado:** PROPUESTA, pendiente de aprobación del usuario.
+**Estado:** PROPUESTA v2, pendiente de aprobación del usuario.
+- v1: bolsa del ciclo que espera aunque no haya a quién curar.
+- v2, acordada con el usuario el 2026-10-16: la bolsa **solo existe mientras haya un perdedor real amputable**. Lo ganado sin perdedor queda como ganancia.
 
 **Rama:** `experimento-2-rediseno`.
 
@@ -38,9 +40,9 @@ Dos veces en cada cuenta, en el mismo segundo:
 ## 2. Objetivos
 
 - Que el Healer **solo ampute patas con pérdida real**, no ruido de spread.
-- Que el **presupuesto del ciclo no se pierda**: lo que no se gasta hoy queda para la pata que de verdad lo necesite.
+- Que el Healer **solo use ganancias obtenidas mientras existe un perdedor real** que se pueda curar. Lo que se gana sin perdedor queda como ganancia del ciclo y nunca se gasta después en curar.
 - **Respetar las reglas del usuario:**
-  - el Healer cura con el **90 % del presupuesto del ciclo**;
+  - el Healer cura con el **90 %** de esas ganancias;
   - solo con **core ≥ 3**;
   - el par entrada + cobertura y las patas LOCK siguen intocables.
 
@@ -51,45 +53,61 @@ Dos veces en cada cuenta, en el mismo segundo:
 
 ## 3. Comportamiento
 
-### 3.1 Patas elegibles: pérdida real mínima
+### 3.1 Perdedor real
 
-Una pata solo es amputable si su pérdida, medida en **movimiento de precio por onza**, alcanza `healer_min_move_usd`:
+Una pata es **perdedor real** si cumple las dos condiciones:
+- **es amputable:** no pertenece a un par congelado ni es pata LOCK, y no la excluye la protección de cobertura (las mismas reglas que hoy);
+- **su pérdida, medida en movimiento de precio por onza, alcanza `healer_min_move_usd`:**
 
 ```
 perdida_por_onza = -(profit + swap) / (volumen × tamaño_contrato)
-elegible  <=>  perdida_por_onza >= healer_min_move_usd
+perdedor real  <=>  amputable  y  perdida_por_onza >= healer_min_move_usd
 ```
 
 - **Nuevo parámetro:** `healer_min_move_usd`, DEFAULT **2.0** $/oz.
   - Se expresa en movimiento de precio, como los demás umbrales del candado.
-  - Valor 0 = comportamiento actual.
+  - Valor 0 = cualquier pata amputable en rojo cuenta, que es el comportamiento actual.
 - **Por qué 2 $** (*decisión mía*):
   - el spread del oro ronda 0,2–0,35 $, así que 2 $ deja fuera el spread con mucho margen;
   - y sigue siendo menos de un tercio del ATR(M15) típico, así que una pata de verdad perdedora entra enseguida.
-- Una pata que no llega al umbral **no se toca**, y el presupuesto **espera**.
 
-### 3.2 Presupuesto del ciclo que no se pierde
+### 3.2 La bolsa solo existe mientras haya un perdedor real
 
-El presupuesto pasa a ser una **bolsa del ciclo**, `healer_budget`, en $:
+En cada pasada del Healer:
 
-- **Entra:** cada deal ganador nuevo del magic suma `0,90 × beneficio`. Ahí se aplica la regla del 90 %, una sola vez.
-- **Sale:** cada amputación resta lo que de verdad costó, es decir, la pérdida realizada de los lotes cerrados (`−money × fracción`).
-- **No se toca:** si no hay pata elegible, la bolsa no cambia y se guarda para la siguiente pasada.
-- **Se vacía:** al cerrar el ciclo, igual que hoy con el rebase del cursor.
+1. **Se leen los deals ganadores nuevos del magic**, con el cursor de siempre. El cursor avanza siempre.
+2. **Si ahora no hay ningún perdedor real:**
+   - esas ganancias quedan como ganancia del ciclo y **no** entran en la bolsa;
+   - si la bolsa tenía algo, por ejemplo porque el perdedor se recuperó por debajo de 2 $ o se cerró, **se libera**: vuelve a 0 y lo que quedaba es ganancia normal.
+3. **Si hay perdedor real:**
+   - cada ganancia nueva suma `0,90 × beneficio` a la bolsa;
+   - el Healer amputa **una parte** del peor perdedor real.
 
-**Mientras core < 3** el Healer sigue sin amputar. Los beneficios que lleguen en ese tiempo se suman a la bolsa al volver a core ≥ 3; hoy ya funciona así.
+**Cuánto se amputa:**
+- `lotes = floor(bolsa / pérdida_por_lote)`, en pasos del broker y con tope en el volumen de la pata.
+- Si no cabe ni el lote mínimo, no se amputa y la bolsa espera, mientras siga habiendo perdedor real.
+- La bolsa baja exactamente lo realizado (`−money × fracción`).
 
-**Lotes a cerrar:** `floor(bolsa / coste_por_lote)`, en pasos del broker y con tope en el volumen de la pata. Si no cabe ni el lote mínimo, no se amputa y la bolsa espera.
+Así, cada ganancia que llega mientras la pata pierde le recorta un trozo, y la pata se va cerrando poco a poco. Si no llegan ganancias suficientes, la pata no se elimina del todo por esta vía. La cierra el resto del ciclo: Unwind, cierre de cesta o candado.
 
-**Reinicio del bot.** La bolsa vive en memoria; tras un reinicio empieza en 0, como hoy el cursor.
+**Core < 3:** el Healer sigue sin actuar.
+- Al cerrarse una recovery con ganancia quedan 2 patas.
+- Esa ganancia se ve en la siguiente pasada con core ≥ 3. En ese momento solo entra en la bolsa si ya hay un perdedor real; una recovery recién abierta no lo es.
+- *Decisión mía:* lo dejo así. Con core < 3 solo queda el par protegido, así que en ese momento tampoco había a quién curar. Es coherente con la regla.
+
+**Cierre del ciclo:** la bolsa vuelve a 0, como hoy el rebase del cursor.
+
+**Reinicio del bot:** la bolsa vive en memoria y vuelve a 0, como hoy el cursor.
 - *Decisión mía:* lo dejo así porque los reinicios son raros.
-- Si es un error, el coste es curar menos en un ciclo que cruce un reinicio.
+- Si es un error, el coste es curar algo menos en un ciclo que cruce un reinicio.
 
 ### 3.3 Log
 
-- `HEALER` sigue igual en cada amputación y añade la bolsa restante: `... Lotes amputados: X. Bolsa restante: Y $`.
-- **Nuevo:** una sola vez por ciclo, cuando hay bolsa pero ninguna pata alcanza el umbral:
-  `Healer en espera: bolsa X $, ninguna pata con perdida >= 2.00 $/oz.`
+- **En cada amputación,** `HEALER` sigue igual y añade la bolsa restante: `... Lotes amputados: X. Bolsa restante: Y $`.
+- **Una vez por ganancia que no entra en la bolsa porque no hay perdedor real:**
+  `Healer: ganancia X $ sin perdedor real (>= 2.00 $/oz): queda como ganancia.`
+- **Cuando se libera una bolsa con saldo:**
+  `Healer: bolsa Y $ liberada (ya no hay perdedor real).`
 
 ## 4. Configuración
 
@@ -100,17 +118,16 @@ El presupuesto pasa a ser una **bolsa del ciclo**, `healer_budget`, en $:
 
 ## 5. Tests (script-style, `python -m tests.test_healer`)
 
-1. **Pata recién abierta:** con bolsa de 50 $, una recovery en rojo de 0,3 $/oz no se amputa y la bolsa sigue en 50 $.
-2. **Pata con pérdida real:** la misma bolsa y una recovery a −5 $/oz. Se amputan `floor(50 / coste_por_lote)` lotes y la bolsa baja exactamente lo realizado.
-3. **Bolsa que espera:**
-   - sin pata elegible, un ganador de 40 $ deja la bolsa en 36 $;
-   - otro de 20 $ la sube a 54 $;
-   - después se amputa con 54 $.
-4. **Regla del 90 %:** un ganador de 100 $ suma 90 $, no 100 $.
-5. **Cierre de ciclo:** la bolsa se vacía y el ciclo nuevo empieza en 0.
-6. **Interruptor:** con `healer_min_move_usd = 0`, la recovery recién abierta vuelve a ser amputable. Es el comportamiento actual, como referencia.
-7. **Protecciones intactas:** el par entrada + cobertura y las patas LOCK siguen sin tocarse aunque haya bolsa y superen el umbral.
-8. **Suites existentes en verde:** `test_supervivencia`, `test_ledger`, `test_m5_and_budget`, `test_mt5_prep` y `test_reentrada`.
+1. **Recovery recién abierta:** un ganador de 57 $ con solo una recovery a −0,3 $/oz no amputa nada. La bolsa queda en 0 y se escribe el log de ganancia libre.
+2. **Perdedor real:** una recovery a −5 $/oz y un ganador nuevo de 50 $. La bolsa sube a 45 $ y se amputan `floor(45 / pérdida_por_lote)` lotes. La bolsa baja exactamente lo realizado.
+3. **Poco a poco:** tres ganadores sucesivos con el mismo perdedor real. Cada uno recorta un trozo y el volumen de la pata baja en cada pasada.
+4. **Liberación:** con la bolsa en 10 $ (no cabe el lote mínimo), el perdedor vuelve a −1 $/oz. La bolsa pasa a 0 y se escribe el log de liberación.
+5. **Ganancia previa al perdedor:** un ganador sin perdedor real, y luego la pata cae a −5 $/oz sin ganadores nuevos. No hay amputación: la ganancia anterior no se usa.
+6. **Regla del 90 %:** un ganador de 100 $ con perdedor real suma 90 $ a la bolsa.
+7. **Cierre de ciclo:** la bolsa vuelve a 0.
+8. **Interruptor:** con `healer_min_move_usd = 0`, una recovery en rojo por spread vuelve a ser perdedor real (referencia del comportamiento actual).
+9. **Protecciones intactas:** la entrada en rojo de un par congelado y las patas LOCK no cuentan como perdedor real, ni abren la bolsa ni se amputan.
+10. **Suites existentes en verde:** `test_supervivencia`, `test_ledger`, `test_m5_and_budget`, `test_mt5_prep` y `test_reentrada`. Si algún test de `test_m5_and_budget` [13–14] asumía el comportamiento antiguo, se ajusta y se explica en el commit.
 
 ## 6. Despliegue
 
@@ -131,6 +148,5 @@ Según el ciclo acordado:
 
 ## 7. Riesgos
 
-- **La bolsa puede curar más que hoy.** Al no perderse el presupuesto, la recovery que de verdad pierde recibe amputaciones más grandes. Es justo la intención del Healer, pero realiza más pérdida dentro del ciclo.
-  - Lo acota la regla del 90 %: nunca se realiza más del 90 % de lo ganado en el ciclo.
-- **Umbral fijo de 2 $** en mercados muy quietos: una pata de verdad perdedora podría tardar en llegar a 2 $. El efecto es solo esperar un poco más.
+- **El Healer curará menos que hoy.** Las ganancias obtenidas antes de que aparezca un perdedor real ya no sirven para curar. Es intencionado: protege lo ganado. A cambio, una pata que se vuelve perdedora tarde, como la venta de 4 090 del 14-oct, solo se cura si después llegan ganancias nuevas.
+- **Umbral fijo de 2 $** en mercados muy quietos: una pata de verdad perdedora puede tardar en contar. El efecto es solo esperar un poco más.
