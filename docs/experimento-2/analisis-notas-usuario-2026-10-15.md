@@ -99,3 +99,80 @@ La regla del filtro de minoría sería más débil:
 **Origen:** el problema descrito en la nota se vio en producción (16 de 21 amputaciones mordieron un Hedge Lock) y se corrigió entonces. Ver la memoria `healer-unwind-hedge-cascade`.
 
 **Conclusión:** no hace falta cambio.
+
+---
+
+# Segunda ronda (pedida por el usuario): rupturas falsas, order blocks, hedge con confirmación
+
+Base de datos:
+- 393 OP1 distintas (99 % de la cuenta base, varias versiones del bot), salidas de 156 velas de ruptura.
+- 38 de esas OP1 acabaron con hedge.
+- Precio M1 desde el 06-jul y M5 antes.
+- No se tiene en cuenta el spread. El P&L lo dominan 4–5 ciclos grandes, así que hay que leerlo como orden de magnitud.
+
+## Rupturas falsas
+
+"Falsa" = una vela M15 cierra de vuelta dentro del nivel roto.
+
+| Dentro de | OP1 con hedge | OP1 sin hedge |
+|---|---|---|
+| 1 vela | 29 % | 7 % |
+| 2 velas | 45 % | 14 % |
+| 4 velas | 66 % | 29 % |
+
+**La señal es real:** una ruptura falsa multiplica por 3–4 la probabilidad de acabar en hedge.
+
+**Filtros sobre la vela de ruptura (aproximado):**
+
+| Filtro | Efecto |
+|---|---|
+| Cuerpo ≥ 50 % | Quita 20 de 38 OP1 con hedge, pero también 107 ganadoras (Δ ≈ −5,2 k$) |
+| Cierre ≥ 0,2 ATR más allá del nivel | Δ ≈ +2,5 k$, todo de un solo ciclo |
+| Rango ≥ 1 ATR | Δ ≈ +4,7 k$, de dos ciclos; no separa las con hedge de las sin hedge (74 % vs 70 %) |
+| Retesteo | Δ ≈ −2,4 k$; el 80 % de esas entradas igualmente llega a 2×ATR en contra |
+
+El peor ciclo (17-jun, −10,6 k$) tuvo una vela de ruptura de manual: ningún filtro lo habría quitado.
+
+## Order blocks (aproximación)
+
+Entrada límite en el último candle contrario antes del impulso:
+- Se llena en 227 de 393.
+- El 81 % de las que se llenan igualmente va 2×ATR en contra.
+- Evitaría 9 hedges y perdería 157 entradas ganadoras.
+
+**No mejora.**
+
+## Hedge con confirmación de giro (CHoCH M15), 41 hedges primarios
+
+| Regla | Hedges | Evitados | Congelado mediana / p90 / máx ($/oz) | Total congelado |
+|---|---|---|---|---|
+| Actual (2×ATR) | 40–41 | – | 16 / 24–26 / 41–47 | ≈ 9,2–9,6 k$ |
+| 2×ATR **y** CHoCH | 24 | 16 | 25 / 52 / 96 (sin cubrir hasta 103) | 11,3 k$ |
+| (1,5×ATR y CHoCH) o 3×ATR | 29 | 12 | 22 / 39 / 58 | 10,1 k$ |
+| (1×ATR y CHoCH) o 2×ATR | 41 | 0 | ≈ igual que hoy | 9,2 k$ |
+
+Ninguna regla con confirmación baja el total congelado: esperar la confirmación cambia unos pocos hedges evitados por una cola mucho peor.
+
+**Suelo de `hedge_dist`:** 350 puntos (3,50 $ de precio). Nunca fue la distancia que mandó.
+
+## Re-locks por periodo
+
+- Re-locks por hedge primario: 0,88 antes del 07-jul, 2,07 entre el 07-jul y el 11-ago, 0,44 después del 11-ago.
+- Los 4 re-locks posteriores son de una cuenta el 18-ago.
+- La cuenta base no tuvo ninguno tras el fix. **Confirmado que ya no ocurre.**
+
+## Re-entradas sobre la misma ruptura (hallazgo nuevo)
+
+**Por qué pasa:** `check_m15_breakout` mira la última vela cerrada, así que la señal sigue viva mientras dure. Tras un cierre por Basket Profit, a los 10 s de cooldown el bot vuelve a entrar.
+
+**Cuánto pasa:** hubo 237 re-entradas sobre 156 señales (hasta 13 en una misma), y el ritmo no cambió tras los fixes de agosto.
+
+| Grupo | N | Tasa de hedge | P&L ciclos | % positivos |
+|---|---|---|---|---|
+| Primera OP1 de la señal | 156 | 10,3 % | +3,0 k$ | 93 % |
+| Re-entrada a < 1 ATR del nivel | 80 | ≈ 6 % | +6,1 k$ | 96 % |
+| Re-entrada a > 1 ATR del nivel | 157 | 10,8 % | −7,4 k$ | 85 % |
+
+**Ojo con el −7,4 k$:** salen de tres ciclos (17-jun, 15-jul y 17-ago). Sin ellos, ese grupo daría +7,4 k$.
+
+**Candidata, no probada:** no re-entrar cuando el precio ya está a más de 1 ATR del nivel roto.
