@@ -176,3 +176,22 @@ Ninguna regla con confirmación baja el total congelado: esperar la confirmació
 **Ojo con el −7,4 k$:** salen de tres ciclos (17-jun, 15-jul y 17-ago). Sin ellos, ese grupo daría +7,4 k$.
 
 **Candidata, no probada:** no re-entrar cuando el precio ya está a más de 1 ATR del nivel roto.
+
+## Variantes del freno con tendencia (tercera ronda)
+
+**Hallazgo clave:** las 237 re-entradas abren **en la misma vela M15** que la primera entrada de su señal. Es churn rápido: el Basket Profit cierra y el bot reabre a los 10 s.
+
+**Una ruptura nueva no "recoge" la tendencia en ese plazo.** De las 132 re-entradas lejanas que ganaron, ninguna tuvo una señal nueva en las 2 velas siguientes.
+
+| Regla | Frenadas | Δ P&L | Δ sin ciclos > ±3 k$ | Grandes pérdidas evitadas |
+|---|---|---|---|---|
+| B0: > 1 ATR del nivel | 157 | +7,4 k$ | −7,4 k$ | 3/3 |
+| B1: excepción si ADX ≥ 25 | 87 | +16,1 k$ | −2,5 k$ | 3/3 (frágil: dos tenían ADX 24,8 y 24,9) |
+| B1: excepción si ADX ≥ 30 | 131 | +13,8 k$ | −4,7 k$ | 3/3 |
+| B2: ADX + H4 + pendiente EMA9 | = B1 | | | |
+| B3: anclar en el último mínimo creciente | 209 | +5,9 k$ | −8,9 k$ | 3/3 |
+| B4: lejos solo si está cerca de la EMA9 | 141 | +7,9 k$ | −6,9 k$ | 3/3 |
+
+**Conclusión:** todas las variantes ganan solo por esquivar 3 desastres (jun, jul y ago). Los tres son anteriores al candado de supervivencia (oct), que ahora acota esa cola.
+
+Ningún criterio separa las re-entradas lejanas buenas de las malas. Con 3 eventos de cola no se pueden fijar umbrales.
