@@ -25,3 +25,5 @@ metadata:
 - En las revisiones, buscar `HEALER` con «Bolsa restante», «sin perdedor real» y «liberada».
 - Tests: `python -m tests.test_healer`. Migración 012. Spec: `docs/superpowers/specs/2026-10-16-healer-patas-frescas-design.md`.
 - Ver [[healer-unwind-hedge-cascade]] y [[healer-budget-accumulates-across-cycles]].
+
+**Despliegue:** migración 012 aplicada y `restart_all` hecho el 2026-10-15 ~22:07 UTC, con el ciclo del 14-oct abierto. Arrancó con la bolsa en 0 y sin amputar nada.

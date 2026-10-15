@@ -10,7 +10,7 @@
 --   * healer_min_move_usd = 0 vuelve al comportamiento anterior del umbral.
 -- Spec: docs/superpowers/specs/2026-10-16-healer-patas-frescas-design.md
 --
--- ESTADO: PENDIENTE de aplicar en Supabase (SQL Editor). Idempotente.
+-- ESTADO: APLICADA en Supabase el 2026-10-15 (SQL Editor). Idempotente.
 -- Sin aplicarla, el bot usa el DEFAULT 2.0 de bot/strategy.py.
 -- ==================================================================
 
