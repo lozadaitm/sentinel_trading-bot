@@ -1,6 +1,6 @@
 # Diseño: observación de re-entradas lejanas + suelo del hedge
 
-**Estado:** PROPUESTA v2, pendiente de aprobación del usuario. No se toca código hasta aprobarla.
+**Estado:** APROBADO por el usuario el 2026-10-15 (v2 + §3.3 horas de riesgo con horario de Nueva York).
 - v1: freno activo.
 - v2, acordada en conversación el 2026-10-15: el freno nace **en modo observación** y el suelo del hedge sube a 800.
 
@@ -84,6 +84,30 @@ En unidades de `_effective_atr()`.
 - `hedge_dist` pasa de **350 a 800** puntos (8 $ de precio).
 - La regla sigue siendo `max(hedge_dist, 2×ATR)`, así que hoy no cambia nada mientras ATR(M15) > 4 $.
 - El watchdog de huérfanos usa la misma distancia.
+
+### 3.3 Horas de riesgo que siguen el cambio de hora de Nueva York
+
+**Problema.** `risk_hours_utc = "1,13,14,15"` está fijo en UTC.
+- Las 13–15 h UTC se eligieron con datos de verano: equivalen a las 9–11 h de Nueva York, con la apertura y los datos de EE. UU.
+- Desde el 1-nov (fin del horario de verano en EE. UU.) esas horas pasan a ser las 14–16 h UTC.
+- La 1 h UTC (sesión asiática) no cambia, porque Asia no tiene horario de verano.
+
+**Solución:**
+- Nuevo parámetro `risk_hours_ny` TEXT, DEFAULT **"9,10,11"**: horas en hora local de Nueva York.
+- `_risk_hour()` = (hora UTC ∈ `risk_hours_utc`) **o** (hora NY ∈ `risk_hours_ny`).
+- La hora de Nueva York sale directamente de la hora del servidor: el servidor de Vantage va siempre a NY + 7 h (ver `survival.utc_hour_from_server`).
+  - Nueva función `survival.ny_hour_from_server(ts) = ((ts − 7 h) // 3600) % 24`.
+
+**Defaults y migración:**
+- Default de `risk_hours_utc`: **"1"**.
+- La migración 011 cambia `risk_hours_utc` a `'1'` y pone `risk_hours_ny` a `'9,10,11'` en las filas que tengan el valor viejo `'1,13,14,15'`.
+- Si la migración no se aplica, la fila conserva `'1,13,14,15'` y se suma `9,10,11` NY desde los DEFAULTS. En invierno quedaría una ventana UTC 13–16, que es más amplia pero segura.
+
+**Test:**
+- 16:30 de servidor en agosto (9:30 NY) es hora de riesgo.
+- 16:30 de servidor en diciembre (9:30 NY, 14:30 UTC) también es hora de riesgo.
+- 06:30 de servidor no lo es.
+- 04:30 de servidor en verano (01:30 UTC) lo es por la regla UTC.
 
 ## 4. Configuración (bot_config)
 
