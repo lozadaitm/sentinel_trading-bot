@@ -32,7 +32,7 @@ Las tres cuentas siguen con las mismas 3 patas (entrada venta 4 147, cobertura c
 
 **Lectura:**
 - **La recovery «V-Shape» es casi toda la pérdida:** unos −82 $/oz, el 85–90 % del flotante. El par entrada + cobertura está congelado en unos −15 $/oz, swaps incluidos.
-- **Entró en el mínimo exacto:** la vela de las 21:15 de servidor del 14-oct marcó 4 089,7 y la recovery vendió en 4 090. Nunca fue más de 0,28 $ a favor. Ningún trailing la habría salvado: el problema es dónde entró, no cómo sale.
+- **Entró tras un rebote, no en el mínimo** *(corregido tras el análisis de recoveries)*: el mínimo fue 4 073,5 a las 19:00 de servidor; la venta entró a las 21:13 en 4 090, con el precio ya 17 $ por encima. Después nunca fue más de 0,28 $ a favor, así que ningún trailing la habría salvado. Ver `analisis-recoveries-2026-10-16.md`.
 - **Las protecciones funcionan como se diseñaron:**
   - el tope de supervivencia bloqueó otra vez la Sentinel Op 4 (L3) a las 04:30 UTC (S 364–421 $ frente a 350 $ exigidos);
   - el candado (S < 150 $) queda unos 215–270 $ por encima del precio actual.
@@ -45,6 +45,6 @@ Las tres cuentas siguen con las mismas 3 patas (entrada venta 4 147, cobertura c
 - **Circuit breaker de volatilidad** a las 02:59 (M15) y 03:48 (M5), liberado en 1–2 min.
 - **Sin errores de órdenes** ni excepciones.
 
-## 4. Propuesta de siguiente paso (solo análisis)
+## 4. Propuesta de siguiente paso (solo análisis) — hecho, ver `analisis-recoveries-2026-10-16.md`
 
 Medir en todo el historial (experimento 1 y actual) **dónde entran las recoveries «V-Shape»** respecto al extremo del movimiento: cuántas venden mínimos o compran máximos, y qué les pasa después. Si el patrón se repite, el siguiente diseño sería un filtro de entrada para la recovery, no un stop.
