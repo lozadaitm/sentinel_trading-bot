@@ -44,3 +44,5 @@ metadata:
 - **Tests:** `python -m tests.test_op4_trend`; las pruebas de la Op4 de copia fijan `rescue_mode='copy'`.
 - **Referencias:** migración 014; spec `docs/superpowers/specs/2026-10-16-op4-tendencia-design.md`.
 - Ver [[healer-real-loser-bag]] y [[survival-cap-basket-lock]].
+
+**Despliegue:** migración 014 aplicada y `restart_all` el 2026-10-16 ~20:33 UTC (viernes, ~25 min antes del cierre semanal). En el primer tick las 3 cuentas abrieron `Sentinel Op 4 (T)` BUY (0,02 / 0,11 / 0,22) a ~4 168,5 contra la recovery del 14-oct (−79 $/oz, 14 ATR). Neto M15 = 0 en las tres: la pérdida queda congelada en el fin de semana. Evaluar desde el lunes 19-oct (trailing 1,0/0,5 ATR, amputaciones «Bolsa restante»).
