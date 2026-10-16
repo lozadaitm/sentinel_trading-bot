@@ -178,7 +178,7 @@ Cifras en $ por cada 0,01 lote, para que las cuentas de tamaños distintos pesen
 
 Esto es solo una propuesta: **no se toca código sin diseño aprobado**.
 
-- **Tres parámetros nuevos** en `bot_config`, con su migración:
+- **Parámetros nuevos** en `bot_config`, con su migración:
   - `m5_trail_mode` (`points` | `atr`);
   - `m5_trail_start_atr` 0,5;
   - `m5_trail_dist_atr` 0,3;
