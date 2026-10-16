@@ -42,3 +42,5 @@ metadata:
   - el resultado por 0,01 lote no debe ser peor.
 - **Tests:** `python -m tests.test_m5_trailing`. Migración 013. Spec: `docs/superpowers/specs/2026-10-16-m5-trailing-atr-design.md`.
 - Ver [[m5-range-regime-v2]].
+
+**Despliegue:** migración 013 aplicada y `restart_all` hecho el 2026-10-16 ~01:02 UTC. Los 6 bots quedaron RUNNING, sin errores, y los M15 retomaron sus 3 posiciones del ciclo del 14-oct.

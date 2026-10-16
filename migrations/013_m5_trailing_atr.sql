@@ -11,7 +11,7 @@
 -- Spec: docs/superpowers/specs/2026-10-16-m5-trailing-atr-design.md
 -- Evidencia: docs/experimento-2/auditoria-m5-2026-10-16.md (secciones 6 y 7)
 --
--- ESTADO: PENDIENTE de aplicar en Supabase (SQL Editor). Idempotente.
+-- ESTADO: APLICADA en Supabase el 2026-10-16 (SQL Editor). Idempotente.
 -- Sin aplicarla, el bot usa los DEFAULT de bot/strategy_m5.py (modo 'atr').
 -- ADD COLUMN ... DEFAULT rellena las filas existentes (M15 y M5); el M15 no
 -- lee estas columnas.
