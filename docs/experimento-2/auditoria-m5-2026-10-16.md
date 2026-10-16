@@ -263,8 +263,8 @@ Simulación de la Op1 sola hasta que cierra en verde o hasta que salta la Op2. V
 - El ciclo es la parte cara: el del 14-oct lleva unos −2 000 $ flotantes en la cuenta de 10 000 $.
 - **Para saber si compensa** hay que conocer el coste medio de un ciclo, y eso solo lo da un backtest del ciclo completo. El arnés existente cierra por vela.
 - **Cuenta orientativa:**
-  - la variante 0,5 / 0,3 gana +383 $/oz a cambio de 21 ciclos más;
-  - compensa solo si cada ciclo cuesta menos de unos 18 $/oz;
+  - la variante 0,5 / 0,3 gana +383 $/oz a cambio de 20 ciclos más;
+  - compensa solo si cada ciclo cuesta menos de unos 19 $/oz;
   - la Op2 sola ya congela unos 15,6 $/oz (mediana de `hedge_dist`).
 - **No hay evidencia suficiente para el M15.** No se propone cambio.
 
