@@ -185,3 +185,105 @@ Esto es solo una propuesta: **no se toca código sin diseño aprobado**.
   - el turbo, en ATR: 1,25 → 0,15.
 - **El ATR en vivo** sería el mismo `self.atr1` que ya calcula el M5 (vela cerrada).
 - **Volver atrás** es poner `m5_trail_mode = points`, sin tocar código.
+
+## 7. Segunda pasada sobre el M5 (pedida por el usuario el 2026-10-16)
+
+Mismo motor de la sección 6. Todo se compara contra la **propuesta** (trailing ATR 0,5 / 0,3, turbo 1,25 → 0,15). Cifras en $ por cada 0,01 lote.
+
+### 7.1 Proyectar un precio objetivo según la entrada
+
+Se calculó, para cada entrada, el siguiente techo o suelo confirmado en la dirección de la operación (fractales de M5, M15 y H1), y además objetivos por volatilidad (1, 1,5, 2 y 3 ATR del M15).
+
+| Uso del objetivo | Total | Semanas ≥ propuesta |
+|---|---|---|
+| Propuesta, sin objetivo | **147,5** | — |
+| Techo/suelo M15: apretar al llegar | 19 a 31 | 0–1 de 5 |
+| Techo/suelo M15: cerrar en el objetivo | −33 | 0 de 5 |
+| Techo/suelo H1: apretar al llegar | 32 a 60 | 1–3 de 5 |
+| Techo/suelo H1: cerrar en el objetivo | −2 | 1 de 5 |
+| 1 ATR(M15): apretar al llegar | 158 | 5 de 5 |
+| 1,5–3 ATR(M15): apretar o cerrar | 134 a 151 | 2–5 de 5 |
+
+- **El objetivo por estructura empeora.** El M5 opera casi siempre en modo tendencia (Surfer), y en tendencia el precio atraviesa esos niveles. Cortar ahí recorta justo las mejores operaciones.
+- **El objetivo por volatilidad empata.** La propuesta ya proyecta: su segunda fase («desde +1,25 ATR, aprieta a 0,15 ATR») es una proyección por ATR. Usar 1 ATR del M15 da +10, que es ruido.
+- **Como filtro de entrada tampoco sirve.** Saltarse entradas con poco recorrido hasta el siguiente nivel no ayuda: los resultados por tramo de recorrido no siguen ningún patrón. En H1, incluso salen peor las que tienen más recorrido.
+
+**Conclusión:** proyectar el objetivo no aporta nada sobre la propuesta.
+
+### 7.2 Otras palancas probadas
+
+| Variante, sobre la propuesta | Total | Semanas ≥ propuesta | Comentario |
+|---|---|---|---|
+| Stop 2 ATR **sin** el suelo de 10 $ | 179,9 | 4/5 | Mejora o empata en las 6 cuentas y con retraso de 1, 2 y 5 s. Peor racha −102 frente a −119. |
+| Stop 1,5 ATR | 77 | 1/5 | Peor. |
+| Stop 2,5–3 ATR | 132–135 | 2/5 | Peor. |
+| Stop en la estructura M15 | 136 | 3/5 | Peor. |
+| TimeStop 20 min | 94 | 2/5 | Peor. |
+| TimeStop 30 / 60 min | 184 / 177 | 3/5 | Irregular. |
+| **TimeStop 90 min** | 222,7 | 4/5 | Mejora en las 6 cuentas y con los 3 retrasos. Peor racha −94. La pérdida media sube de 7,3 a 9,6 $/oz. |
+| Sin TimeStop | 230,6 | 4/5 | Parecido a 90 min, con pérdidas aún más grandes. |
+| **Stop 2 ATR + TimeStop 90** | 224,1 | — | Mejora o empata en las 6 cuentas. Peor racha **−80**. Pérdida media 8,4 $/oz. |
+| Sin las horas 14–16 y 20–21 | 129 | 3/5 | Peor. Se descarta. |
+| Sin ADX 30–35 | 205 | 3/5 | Solo 373 operaciones; irregular. Sospecha de sobreajuste. |
+| Filtros de RSI o de ATR | 27–160 | 2–4/5 | Sin mejora estable. |
+
+**Lectura:**
+- La palanca principal sigue siendo el **trailing por ATR**.
+- El stop en 2 ATR sin suelo y el TimeStop de 90 min son mejoras **secundarias**.
+  - Ya existen como configuración (`m5_hard_sl_points` y `m5_max_trade_min`), así que se aplican sin tocar código.
+  - Conviene aplicarlas **después** del trailing, una cosa cada vez, para poder atribuir cada efecto.
+- **El TimeStop largo hace cada pérdida algo más grande,** aunque haya menos pérdidas.
+
+## 8. ¿Aplica al M15? (Op1 y vigilancia de la Op2)
+
+**Medición, no backtest del ciclo.** Son 190 Op1 reales, del 6-jul al 14-oct, con velas M1. Las otras 212 Op1 del historial no tienen velas M1 en el terminal.
+
+### 8.1 La Op1 sola tiene la misma asimetría que el M5
+
+- **Cómo sale hoy:** la cesta se arma a **+0,83 $/oz** (`basket_arm_move_usd`) y cierra al retroceder **0,1 ATR** (`retrace_atr_mult`, mínimo 0,11 $). Los valores en vivo son los mismos en todas las filas.
+- **El smart trail de la Op1** (arranca a 1 ATR y sigue a 1,5 ATR) solo pone stop por encima de la entrada a partir de +1,5 ATR. Casi nunca actúa antes que la cesta.
+- **Cobro real de las Op1 en verde** (396 cerradas, experimento 1): mediana **1,5 $/oz**, a los **3 minutos**.
+- **Recorrido a favor antes de llegar a la cobertura:** mediana **1,45 ATR(M15)**, unos 11 $.
+  - El 63 % llega a +1 ATR;
+  - el 50 % llega a +1,5 ATR;
+  - el 25 % llega a +3 ATR.
+
+### 8.2 Un trailing más holgado en la Op1 tiene un precio: más ciclos
+
+Simulación de la Op1 sola hasta que cierra en verde o hasta que salta la Op2. Velas M1, con orden pesimista: dentro de cada vela, primero lo adverso.
+
+| Salida de la Op1 | Cierra en verde | Cobro medio | Total cobrado | Termina en Op2 (ciclo) |
+|---|---|---|---|---|
+| Actual (cesta) | 88 % | 3,5 $/oz | 589 $/oz | **12 %** |
+| ATR(M15) 0,5 / 0,3 | 77 % | 6,6 | 972 | 23 % |
+| ATR(M15) 1,0 / 0,5 | 61 % | 11,2 | 1 284 | 39 % |
+| ATR(M15) 1,5 / 0,75 | 47 % | 14,9 | 1 328 | 53 % |
+
+- El trailing holgado **duplica lo cobrado**, pero también **duplica o triplica las Op1 que acaban en ciclo** (Op2, recoveries y candado).
+- El ciclo es la parte cara: el del 14-oct lleva unos −2 000 $ flotantes en la cuenta de 10 000 $.
+- **Para saber si compensa** hay que conocer el coste medio de un ciclo, y eso solo lo da un backtest del ciclo completo. El arnés existente cierra por vela.
+- **Cuenta orientativa:**
+  - la variante 0,5 / 0,3 gana +383 $/oz a cambio de 21 ciclos más;
+  - compensa solo si cada ciclo cuesta menos de unos 18 $/oz;
+  - la Op2 sola ya congela unos 15,6 $/oz (mediana de `hedge_dist`).
+- **No hay evidencia suficiente para el M15.** No se propone cambio.
+
+### 8.3 Vigilancia de la Op2: ¿salta antes de tiempo?
+
+Regla actual: la cobertura salta a **max(8 $, 2 × ATR(M15))**; mediana 15,6 $.
+
+- El 97 % de las Op1 que no se cierran antes llega a esa distancia, tras unos 194 min de mediana.
+- **Tras saltar la cobertura, el precio sigue en contra de mediana 3,8 veces esa distancia** en las 24 h siguientes (p90: 6 veces).
+- Aun así, en el 72 % de los casos el precio vuelve a la entrada dentro de esas 24 h.
+
+**¿Ayuda esperar a que se rompa la estructura** (el suelo o techo M15 que invalida la entrada)?
+
+| Al tocar la cobertura | Casos | Vuelve a la entrada en 24 h | Peor recorrido en contra después |
+|---|---|---|---|
+| Estructura ya rota | 93 | 67 % | 4,3 veces la distancia |
+| Estructura intacta | 92 | 77 % | 3,3 veces la distancia |
+
+- La estructura apenas distingue los casos.
+- **Con la estructura intacta, el precio sigue yendo 3,3 veces la distancia en contra.** Retrasar la Op2 hasta que se rompa la estructura habría dejado la Op1 desnuda en recorridos muy grandes.
+
+**Conclusión:** con estos datos, la Op2 no salta antes de tiempo. Congela pérdidas que de otro modo se multiplicarían por 3–4 antes de volver. El problema del ciclo está en lo que pasa después de la Op2 (recoveries y cola), no en el disparo.
