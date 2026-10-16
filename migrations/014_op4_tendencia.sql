@@ -11,7 +11,7 @@
 -- Spec: docs/superpowers/specs/2026-10-16-op4-tendencia-design.md
 -- Evidencia: docs/experimento-2/analisis-op4-direccion-2026-10-16.md
 --
--- ESTADO: PENDIENTE de aplicar en Supabase (SQL Editor). Idempotente.
+-- ESTADO: APLICADA en Supabase el 2026-10-16 (SQL Editor). Idempotente.
 -- Sin aplicarla, el bot usa los DEFAULT de bot/strategy.py (modo 'trend').
 -- ==================================================================
 
