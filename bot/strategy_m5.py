@@ -102,6 +102,13 @@ DEFAULTS = {
     "m5_trail_step": 10,
     "m5_turbo_trigger": 300,
     "m5_turbo_dist": 150,
+    # Trailing proporcional al ATR (spec 2026-10-16-m5-trailing-atr). 'points' = el
+    # trailing en puntos fijos de arriba, intacto. ATR = el de la apertura, fijo.
+    "m5_trail_mode": "atr",
+    "m5_trail_start_atr": 0.50,
+    "m5_trail_dist_atr": 0.30,
+    "m5_turbo_trigger_atr": 1.25,
+    "m5_turbo_dist_atr": 0.15,
     # Añadidos
     "m5_max_spread": 350,
     "m5_use_vcb": True,
@@ -171,6 +178,7 @@ class M5Engine:
         self.close1 = self.high1 = self.low1 = 0.0
         self.bigbro_bias = 0
         self.df_m5 = None
+        self._trail_logged = set()    # tickets con el "Trailing ATR armado" ya logueado
 
         # NewsGuard (Fase 1): ventana dura alrededor de noticias rojas.
         self.news = news.NewsGuard(config.NEWS_CALENDAR_PATH, logger)
@@ -389,8 +397,12 @@ class M5Engine:
         turbo_trig = int(self._p("m5_turbo_trigger"))
         turbo_dist = int(self._p("m5_turbo_dist"))
         stops_level = self.b.stops_level()
+        atr_mode = str(self._p("m5_trail_mode")).lower() == "atr"
+        entry_atr = self._entry_atr_fn() if (use_trail and atr_mode) else None
 
-        for p in self._my_positions():
+        positions = self._my_positions()
+        self._trail_logged &= {p.ticket for p in positions}
+        for p in positions:
             # 1. TIME STOP: solo cierra si esta PERDIENDO tras X minutos. Si va
             #    ganando se deja correr (lo gestiona el trailing).
             money = p.profit + p.swap
@@ -408,10 +420,24 @@ class M5Engine:
                 points = (p.price_current - p.price_open) / point
             else:
                 points = (p.price_open - p.price_current) / point
-            if points < trail_start:
-                continue
-
-            active_dist = turbo_dist if points >= turbo_trig else trail_dist
+            if atr_mode:
+                # Spec 2026-10-16: arranque, distancia y turbo en multiplos del ATR
+                # de la apertura (en $ -> puntos). Fijo durante toda la operacion,
+                # como en el backtest; no depende de estado (sobrevive reinicios).
+                a = entry_atr(p) / point
+                if not a > 0:
+                    continue   # ATR aun no disponible (arranque): sin trailing este tick
+                start_pts = float(self._p("m5_trail_start_atr")) * a
+                if points < start_pts:
+                    continue
+                if points >= float(self._p("m5_turbo_trigger_atr")) * a:
+                    active_dist = float(self._p("m5_turbo_dist_atr")) * a
+                else:
+                    active_dist = float(self._p("m5_trail_dist_atr")) * a
+            else:
+                if points < trail_start:
+                    continue
+                active_dist = turbo_dist if points >= turbo_trig else trail_dist
             # El broker rechaza un SL demasiado pegado al precio: se respeta su
             # SYMBOL_TRADE_STOPS_LEVEL con un colchon, como en el EA original.
             min_safe = max(float(active_dist), float(stops_level) + 20.0)
@@ -429,6 +455,31 @@ class M5Engine:
                     update = True
             if update:
                 self.b.modify_sl(p, new_sl)
+                if atr_mode and p.ticket not in self._trail_logged:
+                    self._trail_logged.add(p.ticket)
+                    self.log.write("GRINDER",
+                                   f"Trailing ATR armado: ticket #{p.ticket}, ATR {entry_atr(p):.2f} $, "
+                                   f"avance {points * point:.2f} $, SL {new_sl:.2f}.",
+                                   p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
+
+    def _entry_atr_fn(self):
+        """-> f(pos) = ATR(14) M5 de la ultima vela CERRADA antes de la apertura.
+
+        Es el mismo atr1 que vio la entrada (la vela previa a la que contiene
+        p.time). Respaldo: atr1 vigente si la apertura no esta en df_m5.
+        """
+        df = self.df_m5
+        if df is None or len(df) < 3:
+            return lambda p: self.atr1
+        times = df["time"].values.astype("datetime64[s]").astype("int64")
+        atr = indicators.atr(df, 14).values
+
+        def f(p):
+            i = int(times.searchsorted(int(p.time), side="right")) - 1   # vela que contiene la apertura
+            if i < 1 or i >= len(times) or not atr[i - 1] > 0:
+                return self.atr1
+            return float(atr[i - 1])
+        return f
 
     def close_all(self, reason):
         """Cierre inmediato de todo lo propio por comando externo (force_close

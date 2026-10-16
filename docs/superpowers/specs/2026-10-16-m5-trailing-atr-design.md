@@ -1,6 +1,6 @@
 # Diseño: trailing del M5 proporcional al ATR
 
-**Estado:** PROPUESTA, pendiente de aprobación del usuario.
+**Estado:** APROBADO por el usuario el 2026-10-16. Implementado (código, tests, migración 013).
 
 **Rama:** `experimento-2-rediseno`.
 

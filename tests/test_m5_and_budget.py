@@ -258,7 +258,7 @@ def run():
     # ---------- 4. Trailing con histeresis y stops_level ----------
     b3, lg3 = FakeBroker(), FakeLogger()
     eng3 = TestEngine(b3, lg3, df5, series(**UP_M15))
-    eng3.cfg = {}
+    eng3.cfg = {"m5_trail_mode": "points"}   # este bloque cubre el modo en puntos (el ATR: tests.test_m5_trailing)
     eng3.now = 1_700_050_000
     p = FakePos(99, mt5.POSITION_TYPE_BUY, 0.1, 4000.0, 1_700_049_000, "M5 Surfer Buy", b3.magic)
     p.price_current = 4002.0   # +200 pt: supera trail_start=100

@@ -23,3 +23,4 @@
 - [MT5: updates y altas](mt5-updates-and-onboarding.md) — autoupdate de MT5 tumba el IPC (actualizar en fin de semana), provisioner como SYSTEM no sembraba el perfil, Algo Trading forzado en cada arranque (mt5_prep)
 - [Re-entradas, suelo hedge, horas NY](reentry-observation-hedge-floor.md) — re-entradas sobre la misma ruptura en observación (reentry_enforce), hedge_dist 800, risk_hours_ny sigue el DST; lista de ideas descartadas con datos; migración 011
 - [Healer: perdedor real y bolsa](healer-real-loser-bag.md) — solo amputa pérdidas >= 2 $/oz; la bolsa (90 %) solo se llena mientras hay perdedor real, lo demás queda como ganancia; migración 012
+- [M5: trailing por ATR](m5-trailing-atr.md) — trailing en múltiplos del ATR de la apertura (0,5/0,3, turbo 1,25→0,15), m5_trail_mode='points' revierte; objetivos por estructura descartados; migración 013
