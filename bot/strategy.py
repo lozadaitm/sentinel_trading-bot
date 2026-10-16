@@ -70,11 +70,19 @@ DEFAULTS = {
     # --- Re-entradas sobre la misma ruptura (spec 2026-10-15-reentrada-y-suelo-hedge) ---
     "reentry_max_atr": 1.0,           # re-entrada "lejana" si el precio esta a > N*ATR del nivel roto (0 = apagado)
     "reentry_enforce": False,         # False = solo observacion (abre y loguea); True = no abre la lejana
+    # --- Op4 a favor del movimiento (spec 2026-10-16-op4-tendencia) ---
+    "rescue_mode": "trend",           # 'trend' = contra la pata que pierde (reduce el neto); 'copy' = martingala vieja
+    "rescue_trend_k_atr": 2.0,        # dispara con la recovery/rescue a >= K*ATR M15 en contra (cierre de vela)
+    "rescue_trend_max_legs": 6,       # cupo de Op4 por ciclo en modo trend (cuenta rescue_opened)
+    "rescue_trend_trail_start_atr": 1.0,  # trailing propio de la Op4 (T): arranque en ATR
+    "rescue_trend_trail_dist_atr": 0.5,   # y distancia en ATR (sin turbo)
 }
 # Tope de supervivencia y umbrales en movimiento (bot/survival.py): solo se
 # anaden las claves que este motor no define (equity_weight mantiene su 0.80).
 for _k, _v in survival.DEFAULTS.items():
     DEFAULTS.setdefault(_k, _v)
+
+OP4_TREND_COMMENT = "Sentinel Op 4 (T)"   # prefijo "Sentinel Op 4" => rol RESCUE en el ledger
 
 # Estados del candado de cesta (spec §5.3)
 LOCK_FREE = "LIBRE"        # sin patas LOCK
@@ -171,6 +179,7 @@ class SentinelEngine:
         self.m5_open1 = self.m5_close1 = 0.0
         self.df_h4 = None
         self.df_m15 = None
+        self._op4t_bar = None             # ultima vela M15 cerrada evaluada por la Op4 tendencia
 
     # ==============================================================
     # Helpers de parametros
@@ -1670,6 +1679,9 @@ class SentinelEngine:
         sus coberturas no cuentan profundidad ni pueden ser el 'op3' de anclaje."""
         if not self._p("use_rescue_mode"):
             return
+        if str(self._p("rescue_mode")).strip().lower() == "trend":
+            self._check_rescue_trend(positions)
+            return
         if self.spread_high or self.vol_breaker or self.close_only:
             return  # no abrir martingala con spread alto, vela anomala (VCB) ni en close-only
         if len(positions) < 3:
@@ -1745,6 +1757,95 @@ class SentinelEngine:
                                     ledger.ROLE_RESCUE, comment)
                 if self._last_additive_sent:   # cooldown solo si la orden SALIO al broker
                     self.last_rescue_time = self.now
+
+    def _op3_trail_params(self, leg, pts, current_atr, point):
+        """(arranque, distancia) en puntos del trailing de la ultima pata del ciclo.
+        La Op4 tendencia usa su trailing propio, sin turbo (spec 2026-10-16)."""
+        if self._is_trend_op4(leg):
+            return ((current_atr * float(self._p("rescue_trend_trail_start_atr"))) / point,
+                    (current_atr * float(self._p("rescue_trend_trail_dist_atr"))) / point)
+        start_pts = (current_atr * float(self._p("op3_start_atr"))) / point
+        active_dist = (current_atr * float(self._p("op3_base_dist_atr"))) / point
+        if pts >= (current_atr * float(self._p("op3_turbo_trigger_atr"))) / point:
+            active_dist = (current_atr * float(self._p("op3_turbo_dist_atr"))) / point
+        return start_pts, active_dist
+
+    @staticmethod
+    def _is_trend_op4(p):
+        return (p.comment or "").startswith(OP4_TREND_COMMENT)
+
+    def _check_rescue_trend(self, positions):
+        """Op4 tendencia (spec 2026-10-16-op4-tendencia): en vez de copiar la
+        ultima pata, abre CONTRA la recovery/rescue que mas pierde (a favor del
+        movimiento), con tamano <= |neto del ciclo|. Reduce el neto, asi que el
+        tope de supervivencia la deja pasar; sus ganancias alimentan al Healer,
+        que recorta la perdedora. Una abierta a la vez; se evalua una vez por
+        vela M15 cerrada. Sin hora de riesgo ni gate H4: no promedia.
+        """
+        if self.spread_high or self.vol_breaker or self.close_only or self.news_block:
+            return
+        if len(positions) < 3:
+            return
+        if self.lock_state != LOCK_FREE:
+            return   # con candado vivo ya esta neutralizado (y el trailing de Op3 se apaga)
+        if self.now - self.last_rescue_time < int(self._p("rescue_cooldown")):
+            return
+        df = self.df_m15
+        if df is None or len(df) < 2:
+            return
+        bar_t = df["time"].iloc[-2]
+        if bar_t == self._op4t_bar:
+            return   # esta vela cerrada ya se evaluo
+        self._op4t_bar = bar_t
+        if any(self._is_trend_op4(p) for p in positions):
+            return   # una sola a la vez: el Healer recorta entre una y otra
+        opened = int(self.cycle.get_meta("rescue_opened", 0))
+        if opened >= int(self._p("rescue_trend_max_legs")):
+            if not self.cycle.get_meta("op4t_cap_logged"):
+                self.cycle.set_meta("op4t_cap_logged", True)
+                self.log.write("RESCATE", "Op4 tendencia: cupo del ciclo agotado.",
+                               balance=self.b.account_balance())
+            return
+
+        close1 = float(df["close"].iloc[-2])
+        atr = self._effective_atr()
+        k = float(self._p("rescue_trend_k_atr"))
+        frozen = self.cycle.pair_members(positions) | {p.ticket for p in self.cycle.lock_legs(positions)}
+        roles = (ledger.ROLE_RECOVERY, ledger.ROLE_RESCUE)
+        target, worst = None, 0.0
+        for p in positions:
+            if p.ticket in frozen or self.cycle.role_of(p.ticket) not in roles:
+                continue
+            loss = (p.price_open - close1) if p.type == mt5.POSITION_TYPE_BUY else (close1 - p.price_open)
+            if loss >= k * atr - 1e-9 and loss > worst:
+                target, worst = p, loss
+        if target is None:
+            return
+
+        net = survival.net_lots(positions)
+        if target.type == mt5.POSITION_TYPE_SELL:
+            otype, side = mt5.ORDER_TYPE_BUY, "BUY"
+            if net >= 0:
+                return   # comprar no reduciria el neto
+        else:
+            otype, side = mt5.ORDER_TYPE_SELL, "SELL"
+            if net <= 0:
+                return
+        step = self.b.volume_step()
+        lots = math.floor(min(target.volume, abs(net)) / step + 1e-9) * step
+        lots = round(lots, 8)
+        if lots < self.b.volume_min() - 1e-9:
+            return
+        ok = self._open_additive(otype, lots, OP4_TREND_COMMENT, ledger.ROLE_RESCUE, "Op4 tendencia")
+        if self._last_additive_sent:
+            self.last_rescue_time = self.now
+        if ok:
+            self.log.write(
+                "RESCATE",
+                f"Op4 tendencia: {side} {lots:.2f} lotes @ {close1:.2f} contra la recovery "
+                f"#{target.ticket} (-{worst:.2f} $/oz, {worst / atr:.1f} ATR). "
+                f"Op4 {opened + 1}/{int(self._p('rescue_trend_max_legs'))} del ciclo.",
+                balance=self.b.account_balance(), ticket=target.ticket)
 
     # ==============================================================
     # BUFFERS (equivalente a los CopyBuffer de OnTick)
@@ -2205,11 +2306,7 @@ class SentinelEngine:
                         else:
                             pts = (op3.price_open - op3.price_current) / point
 
-                        start_pts = (current_atr * float(self._p("op3_start_atr"))) / point
-                        active_dist = (current_atr * float(self._p("op3_base_dist_atr"))) / point
-                        turbo_trigger_pts = (current_atr * float(self._p("op3_turbo_trigger_atr"))) / point
-                        if pts >= turbo_trigger_pts:
-                            active_dist = (current_atr * float(self._p("op3_turbo_dist_atr"))) / point
+                        start_pts, active_dist = self._op3_trail_params(op3, pts, current_atr, point)
 
                         if pts > start_pts:
                             if op3.type == mt5.POSITION_TYPE_BUY:

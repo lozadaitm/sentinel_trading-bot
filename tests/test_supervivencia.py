@@ -183,7 +183,7 @@ def test_min_lot_account_blocks_once():
 def test_rescue_cooldown_only_when_sent():
     from bot import ledger
     for blocked in (True, False):
-        e, b, log = _eng()
+        e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_mode": "copy"})   # Op4 de copia (vieja)
         e.now = 1_700_050_000
         e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
         for i in range(3):
@@ -226,7 +226,7 @@ def test_parity_across_accounts():
 def test_rescue_churn_capped():
     """19-ago 12:57-13:11 UTC: Op4 abierta, cobrada y reabierta en bucle. El tope
     cuenta las abiertas en el CICLO (meta rescue_opened), no las vivas."""
-    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False})
+    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False, "rescue_mode": "copy"})
     e.now = ts(2026, 8, 19, 6) + 1800   # 03 UTC: fuera de horas de riesgo
     e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
     b._price = 4000.0
@@ -272,7 +272,7 @@ def test_unwind_respects_survival():
 
 
 def test_risk_hours_block_recovery_and_rescue():
-    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False})
+    e, b, log = _eng(cfg={"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False, "rescue_mode": "copy"})
     e.atr0, e.rsi0, e.struct_h4 = 2.0, 75.0, 0
     e.cycle.set_meta("ref_lot", 0.01)
     legs = []

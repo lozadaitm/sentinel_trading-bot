@@ -150,6 +150,11 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     vcb_atr_mult            DOUBLE PRECISION DEFAULT 2.8,
     max_net_lots            DOUBLE PRECISION DEFAULT 1.0,
     max_rescue_legs         INTEGER          DEFAULT 3,
+    rescue_mode                  TEXT             DEFAULT 'trend',   -- migracion 014
+    rescue_trend_k_atr           DOUBLE PRECISION DEFAULT 2.0,
+    rescue_trend_max_legs        INTEGER          DEFAULT 6,
+    rescue_trend_trail_start_atr DOUBLE PRECISION DEFAULT 1.0,
+    rescue_trend_trail_dist_atr  DOUBLE PRECISION DEFAULT 0.5,
     use_recovery_h4_gate    BOOLEAN          DEFAULT true,
 
     -- 10. Otros

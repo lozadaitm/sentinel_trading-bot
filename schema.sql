@@ -130,6 +130,13 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     -- 13. Healer: perdedor real minimo, en $/oz (migracion 012)
     healer_min_move_usd     DOUBLE PRECISION DEFAULT 2.0,
 
+    -- 14. Op4 a favor del movimiento (migracion 014)
+    rescue_mode                  TEXT             DEFAULT 'trend',
+    rescue_trend_k_atr           DOUBLE PRECISION DEFAULT 2.0,
+    rescue_trend_max_legs        INTEGER          DEFAULT 6,
+    rescue_trend_trail_start_atr DOUBLE PRECISION DEFAULT 1.0,
+    rescue_trend_trail_dist_atr  DOUBLE PRECISION DEFAULT 0.5,
+
     UNIQUE (user_id, symbol)
 );
 

@@ -876,7 +876,7 @@ def run():
     er = m15_engine(br, lgr)
     # survival_move_usd bajo: el fixture (neto SELL 0.60) excede el tope de supervivencia por
     # diseno; aqui solo se prueba el bloqueo de noticias, no el aguante de la cuenta.
-    er.cfg = {"news_enforce": True, "survival_move_usd": 1.0}
+    er.cfg = {"news_enforce": True, "survival_move_usd": 1.0, "rescue_mode": "copy"}
     er.news_active, er.news_block, er.news_reason = True, True, "CPI (USD) en 30 min"
     er.now = 1_700_050_000
     er.atr0, er.rsi0, er.struct_h4 = 2.0, 75.0, 0
@@ -1005,7 +1005,7 @@ def run():
     def rescue_fixture(cfg):
         br_, lg_ = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
         er_ = m15_engine(br_, lg_)
-        er_.cfg = cfg
+        er_.cfg = dict(cfg, rescue_mode="copy")   # estos casos prueban la Op4 de copia
         er_.now = 1_700_050_000
         er_.atr0, er_.rsi0, er_.struct_h4 = 2.0, 75.0, 0
         br_._price = 4000.0

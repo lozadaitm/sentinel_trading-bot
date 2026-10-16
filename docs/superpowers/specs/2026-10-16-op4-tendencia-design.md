@@ -1,7 +1,8 @@
 # Diseño: Op4 a favor del movimiento («Op4 tendencia»)
 
-**Estado:** PROPUESTO, pendiente de aprobación del usuario.
-- El usuario pidió ponerlo en marcha directamente, sin pasar antes por modo observación (16-oct-2026).
+**Estado:** APROBADO por el usuario el 2026-10-16. Implementado (código, tests, migración 014).
+- Sin modo observación, a petición del usuario.
+- Se aplica también al ciclo abierto del 14-oct: el usuario lo decidió porque ese ciclo llevaba días bloqueado.
 
 **Rama:** `experimento-2-rediseno`.
 

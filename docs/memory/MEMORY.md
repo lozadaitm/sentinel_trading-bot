@@ -24,3 +24,4 @@
 - [Re-entradas, suelo hedge, horas NY](reentry-observation-hedge-floor.md) — re-entradas sobre la misma ruptura en observación (reentry_enforce), hedge_dist 800, risk_hours_ny sigue el DST; lista de ideas descartadas con datos; migración 011
 - [Healer: perdedor real y bolsa](healer-real-loser-bag.md) — solo amputa pérdidas >= 2 $/oz; la bolsa (90 %) solo se llena mientras hay perdedor real, lo demás queda como ganancia; migración 012
 - [M5: trailing por ATR](m5-trailing-atr.md) — trailing en múltiplos del ATR de la apertura (0,5/0,3, turbo 1,25→0,15), m5_trail_mode='points' revierte; objetivos por estructura descartados; migración 013
+- [Op4 a favor del movimiento](op4-trend.md) — la Op4 abre contra la recovery que pierde (>= 2 ATR), tamaño <= neto, trailing 1,0/0,5 ATR, una a la vez y 6 por ciclo; sus ganancias curan vía Healer; rescue_mode='copy' revierte; migración 014
