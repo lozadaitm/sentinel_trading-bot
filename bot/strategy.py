@@ -1393,7 +1393,7 @@ class SentinelEngine:
         if len(own) - len(self.cycle.lock_legs(own)) < int(self._p("healer_min_core")):
             return   # profundidad sin contar las patas LOCK (no son cesta)
 
-        to_dt = datetime.datetime.utcfromtimestamp(self.now) + datetime.timedelta(minutes=5)
+        to_dt = self._deal_window_end()   # hora de servidor + 1 dia (antes + 5 min: 3 h atrasada)
         from_dt = to_dt - datetime.timedelta(days=2)
         deals = self.b.history_deals(from_dt, to_dt)
         if not deals:

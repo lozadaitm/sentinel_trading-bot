@@ -137,6 +137,12 @@ def test_window_not_lagged():
     end = e._deal_window_end()
     check(end >= e._server_dt() + datetime.timedelta(hours=12),
           f"la ventana llega >= 12 h por delante de la hora de servidor (got {end})")
+    calls = []
+    b.history_deals = lambda a, z: (calls.append((a, z)), list(d.items))[1]
+    d.win(50.0)
+    e._check_healing()
+    check(calls and calls[0][1] >= e._server_dt() + datetime.timedelta(hours=12),
+          f"el Healer usa esa misma ventana (got {calls})")
 
 
 def test_op4_open_budget_waits():
