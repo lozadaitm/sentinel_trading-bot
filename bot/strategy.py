@@ -203,6 +203,16 @@ class SentinelEngine:
         deals = self.b.history_deals(from_dt, to_dt)
         if deals:
             self.last_healed_ticket = max(d.ticket for d in deals)
+        # Cursor y bolsa del Healer persistidos en el meta del ciclo: un reinicio
+        # con el ciclo abierto ya no pone la bolsa a cero ni salta los ganadores
+        # que aun no se habian contado. Sin posiciones el meta es de un ciclo muerto.
+        cursor = self.cycle.get_meta("healer_cursor")
+        if cursor is not None and self.b.positions():
+            self.last_healed_ticket = int(cursor)
+            self.healer_budget = float(self.cycle.get_meta("healer_budget") or 0.0)
+            self._healer_needs_rebaseline = False
+            self.log.write("HEALER", f"Healer: cursor #{self.last_healed_ticket} y bolsa "
+                                     f"{self.healer_budget:.2f} $ restaurados del ciclo abierto.")
 
     # ==============================================================
     # Utils numericas (UTILS MQL5)
@@ -345,6 +355,7 @@ class SentinelEngine:
         self._healer_needs_rebaseline = True
         self._cover_protect_logged = False
         self.healer_budget = 0.0
+        self._save_healer_state(clear=True)
         return True
 
     def _close_all(self, reason):
@@ -366,6 +377,7 @@ class SentinelEngine:
         self._healer_needs_rebaseline = True  # C: el proximo ciclo rebasa el cursor del Healer
         self._cover_protect_logged = False
         self.healer_budget = 0.0              # la bolsa es del ciclo
+        self._save_healer_state(clear=True)
 
     # ==============================================================
     # Filtros de entrada
@@ -1406,17 +1418,36 @@ class SentinelEngine:
             self.last_healed_ticket = max_ticket
             self._healer_needs_rebaseline = False
             self.healer_budget = 0.0
+            self._save_healer_state()
             return  # este pass no amputa: el presupuesto del ciclo arranca en cero
 
         if max_ticket > self.last_healed_ticket:
             self.last_healed_ticket = max_ticket
+        try:
+            self._heal_with(budget)
+        finally:
+            self._save_healer_state()
 
+    def _heal_with(self, budget):
+        """Suma `budget` (ganadores nuevos) a la bolsa y amputa, o la libera/aparca."""
         # Bolsa SOLO con perdedor real (spec 2026-10-16). Sin perdedor real, lo
         # ganado queda como ganancia y nunca se gasta despues en curar; si habia
         # bolsa (el perdedor se recupero o se cerro) se libera. El 14-oct se
         # amputaba la recovery recien abierta (roja solo por spread) con lo que
         # habia ganado la anterior.
-        if self._healer_target(self.b.positions())[0] is None:
+        positions = self.b.positions()
+        no_target = self._healer_target(positions)[0] is None
+        if no_target and any(self._is_trend_op4(p) for p in positions):
+            # Op4 (T) viva: la recovery esta cubierta por ella (cerrarla subiria la
+            # exposicion), no "curada". La bolsa espera a que la Op4 cierre y entonces
+            # recorta la recovery con todo lo acumulado (19-oct: se liberaba).
+            if budget > 0:
+                self.healer_budget += 0.90 * budget
+                self.log.write("HEALER", f"Healer: bolsa {self.healer_budget:.2f} $ en espera "
+                                         f"(Op4 tendencia abierta; recorta al cerrarse).",
+                               balance=self.b.account_balance())
+            return
+        if no_target:
             thr = float(self._p("healer_min_move_usd"))
             if budget > 0:
                 self.log.write("HEALER", f"Healer: ganancia {budget:.2f} $ sin perdedor real "
@@ -1432,6 +1463,14 @@ class SentinelEngine:
         if self.healer_budget > 0:
             spent = self._apply_healing(self.healer_budget)
             self.healer_budget = max(0.0, self.healer_budget - spent)
+
+    def _save_healer_state(self, clear=False):
+        """Persiste cursor y bolsa del Healer en el meta del ciclo (solo si cambian)."""
+        cursor = None if clear else int(self.last_healed_ticket)
+        bolsa = None if clear else round(float(self.healer_budget), 6)
+        if self.cycle.get_meta("healer_cursor") != cursor or self.cycle.get_meta("healer_budget") != bolsa:
+            self.cycle.meta["healer_cursor"] = cursor
+            self.cycle.set_meta("healer_budget", bolsa)
 
     def _closing_increases_exposure(self, p):
         """True si cerrar `p` AUMENTA la exposicion neta absoluta de la cesta.
@@ -1898,14 +1937,18 @@ class SentinelEngine:
         return datetime.datetime.utcfromtimestamp(self.now)
 
     def _deal_window_end(self):
-        """Fin de la ventana de history_deals: hora de servidor (los deals vienen en ella) + 5 min.
+        """Fin de la ventana de history_deals: hora de servidor + 1 dia.
 
-        Sin tick todavia (now == 0) cae al reloj local + 1 dia: con ese margen la ventana
-        contiene la hora de servidor sea cual sea el desfase de zona.
+        Antes era + 5 min y la ventana iba 3 h atrasada: la libreria de MT5 trata el
+        datetime naive como hora LOCAL del PC (UTC+3) y los deals vienen con la hora
+        del servidor (UTC+3) ya metida en el epoch, asi que el Healer veia cada cierre
+        3 h tarde (19-oct: la Op4 (T) cerro +149 $ y la recovery no se recorto). Con
+        + 1 dia el ultimo deal siempre entra; los consumidores filtran por ticket o
+        solo preguntan "hay alguno", asi que el margen no duplica nada.
         """
         if not self.now:
             return datetime.datetime.now() + datetime.timedelta(days=1)
-        return self._server_dt() + datetime.timedelta(minutes=5)
+        return self._server_dt() + datetime.timedelta(days=1)
 
     def _check_stop_out(self):
         """Una vez por minuto: deal propio de stop-out ('[so...') nuevo => alerta CRITICA."""

@@ -1539,8 +1539,8 @@ def test_history_windows_use_server_time():
     e._fetch_tick = lambda: type("T", (), {"time": server_now})()
     e.init_history_cursor()
     f, t = calls[0]
-    check(t == srv + _dt.timedelta(minutes=5) and t - f == _dt.timedelta(days=7),
-          f"M15 init_history_cursor: ventana en hora servidor (got {f}..{t})")
+    check(t == srv + _dt.timedelta(days=1) and t - f == _dt.timedelta(days=7),
+          f"M15 init_history_cursor: ventana en hora servidor + 1 dia (got {f}..{t})")
     # Sin tick: cae al reloj local, sin romper.
     e, b, log = _eng()
     calls = []

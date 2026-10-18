@@ -131,10 +131,79 @@ def test_protections_intact():
     check(lock.volume == 0.10 and not b.partials, "pata LOCK intocable")
 
 
+def test_window_not_lagged():
+    import datetime
+    e, b, log, rec, d = _cycle(rec_profit=-50.0)
+    end = e._deal_window_end()
+    check(end >= e._server_dt() + datetime.timedelta(hours=12),
+          f"la ventana llega >= 12 h por delante de la hora de servidor (got {end})")
+
+
+def test_op4_open_budget_waits():
+    from bot import strategy
+    e, b, log, rec, d = _cycle(rec_profit=-50.0)        # 5 $/oz, 500 $/lote
+    op4 = _pos(b, 4, BUY, 0.10, 4170.0, strategy.OP4_TREND_COMMENT, profit=-5.0)
+    e.cycle.sync(b.positions())
+    d.win(50.0)
+    e._check_healing()
+    check(not b.partials and abs(e.healer_budget - 45.0) < 1e-9,
+          f"Op4 (T) viva: la bolsa espera, no se libera (got {e.healer_budget})")
+    check(any("en espera" in m for m in _heal(log)), "log de bolsa en espera")
+    b._pos.remove(op4)                                   # cierra la Op4 (T)
+    e._check_healing()
+    check(b.partials and abs(b.partials[0]["lots"] - 0.09) < 1e-9,
+          f"al cerrar la Op4, la bolsa acumulada recorta la recovery (got {b.partials})")
+
+
+def test_state_survives_restart():
+    from bot import ledger
+    from bot.strategy import SentinelEngine
+    e, b, log, rec, d = _cycle(rec_profit=-5000.0)       # 0.01 = 500 $ > bolsa
+    d.win(100.0)
+    e._check_healing()
+    check(e.cycle.get_meta("healer_cursor") == 9001 and abs(e.cycle.get_meta("healer_budget") - 90.0) < 1e-9,
+          f"cursor y bolsa persistidos en el meta (got {e.cycle.meta})")
+    e2 = SentinelEngine(b, log)                           # "reinicio": mismo broker y archivo de ledger
+    e2.cycle = ledger.CycleLedger(e.cycle.path, log)
+    e2.cfg = e.cfg
+    e2.now = e.now
+    d.win(200.0)                                          # ganador ya existente al arrancar
+    e2.init_history_cursor()
+    check(e2.last_healed_ticket == 9001 and abs(e2.healer_budget - 90.0) < 1e-9
+          and not e2._healer_needs_rebaseline, "el arranque restaura cursor y bolsa del ciclo abierto")
+    e2._check_healing()
+    check(abs(e2.healer_budget - 270.0) < 1e-9, f"el ganador previo al arranque si cuenta (got {e2.healer_budget})")
+
+
+def test_restart_without_positions_ignores_meta():
+    from bot import ledger
+    from bot.strategy import SentinelEngine
+    e, b, log, rec, d = _cycle(rec_profit=-5000.0)
+    d.win(100.0)
+    e._check_healing()
+    b._pos.clear()
+    e2 = SentinelEngine(b, log)
+    e2.cycle = ledger.CycleLedger(e.cycle.path, log)
+    e2.cfg, e2.now = e.cfg, e.now
+    e2.init_history_cursor()
+    check(e2._healer_needs_rebaseline and e2.healer_budget == 0.0, "sin posiciones: meta viejo ignorado")
+
+
+def test_cycle_close_clears_persisted():
+    e, b, log, rec, d = _cycle(rec_profit=-5000.0)
+    d.win(100.0)
+    e._check_healing()
+    e._close_all("test")
+    check(e.cycle.get_meta("healer_cursor") is None and e.cycle.get_meta("healer_budget") is None,
+          "cierre de ciclo: estado persistido borrado")
+
+
 def main():
     for t in (test_fresh_recovery_not_amputated, test_real_loser_amputated, test_little_by_little,
               test_budget_released, test_gain_before_loser_not_used, test_ninety_percent,
-              test_cycle_close_resets, test_switch_off, test_protections_intact):
+              test_cycle_close_resets, test_switch_off, test_protections_intact, test_window_not_lagged,
+              test_op4_open_budget_waits, test_state_survives_restart,
+              test_restart_without_positions_ignores_meta, test_cycle_close_clears_persisted):
         print(t.__name__)
         t()
     print("\ntest_healer: TODO OK")
