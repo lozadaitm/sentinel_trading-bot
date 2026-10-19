@@ -54,3 +54,32 @@
 
 - Las del arnés: cierre de vela M15, sin noticias ni M5, un solo camino de precios.
 - En el estudio de la Op1, el desenlace se simuló con velas M5 y orden conservador, con una ganancia estimada al mínimo.
+
+## 3. Salida de la Op1: buscar más ganancia por operación no mejora
+
+**Método:**
+- 15 ventanas de 30 días, arrancando cada 14 días desde el 2-mar.
+- Cuenta de 10k, sin posiciones al inicio.
+- Motor real con recorte por parejas y Op4 sin límite.
+- Solo cambia la salida de la Op1 cuando está sola.
+- Las posiciones abiertas al final de cada ventana se valoran a precio de mercado.
+
+*La simulación larga (1-mar → 16-oct) no sirve para esto: solo abre una Op1 en 7,5 meses.*
+
+| Salida de la Op1 sola | Retorno medio por ventana | Mediana | Peor | Mejor | Ventanas en positivo | Entradas |
+|---|---|---|---|---|---|---|
+| **Actual** (arma a +0,83 $/oz, retroceso 0,1 ATR) | **−4,1 %** | **−2,2 %** | −20 % | +8,8 % | 6 / 15 | 102 |
+| Arma a +2 $/oz, retroceso 0,25 ATR | −3,9 % | −2,7 % | −20 % | +9,5 % | 6 / 15 | 92 |
+| Arma a +4 $/oz, retroceso 0,5 ATR | −6,3 % | −6,9 % | −20 % | +9,5 % | 4 / 15 | 94 |
+| Solo trailing largo (1 ATR / 1,5 ATR) | −4,8 % | −5,4 % | −20 % | +21,9 % | 3 / 15 | 72 |
+
+**Lectura:**
+- La variante de +2 $/oz queda igual que la actual: la diferencia entra en el ruido.
+- Las salidas más ambiciosas empeoran la mediana y la cantidad de ventanas en positivo.
+- El trailing largo da la mejor ventana (+21,9 %), pero gana en menos ventanas.
+- En las 15 ventanas queda un ciclo abierto al final.
+- El resultado de cada ventana depende sobre todo de si un ciclo se atasca: hay ventanas con 1 a 3 entradas y −15 a −20 %. Cómo sale la Op1 apenas influye.
+
+**Conclusión:** sin cambios en la salida de la Op1.
+- Junto con la sección 2, ni filtrar la entrada ni cambiar la salida de la Op1 mueven el resultado de forma fiable.
+- Lo que mueve la cuenta es cuánto cuesta un ciclo atascado: Op4 sin límite y recorte por parejas, ya en vivo.
