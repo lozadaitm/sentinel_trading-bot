@@ -33,6 +33,25 @@
 | Secundaria a 2 ATR + parejas | +307 | −169 | +84 | −52 | 6 / 15 | 323 | 95 |
 | Secundaria a 2 ATR sin parejas | +323 | −154 | +85 | −52 | 6 / 15 | 323 | 95 |
 
+### Propuesta del usuario: «bolsa secundaria» (misma tarde)
+
+**Cómo funciona:**
+- Con la Op4 principal en rojo X ATR, se abre una sola Op4 secundaria contraria, del mismo tamaño.
+- Las ganancias de la secundaria recortan la Op4 principal, aunque eso suba el neto.
+- Sin límite de Op4.
+
+| Variante | Mejora | Sin los 3 mejores episodios | 14-oct | Peor episodio | Op4 en total | Recoveries que acaban con Op4 abierta |
+|---|---|---|---|---|---|---|
+| Actual (límite 6) | +374 | −83 | +77 | −44 | 106 | 21 |
+| Secundaria a 1 ATR | +216 | −121 | +67 | −28 | 159 | 31 |
+| Secundaria a 2 ATR | +281 | −131 | +73 | −52 | 176 | 31 |
+| Secundaria a 3 ATR | +275 | −134 | +73 | −52 | 166 | 31 |
+
+**Lectura de la bolsa secundaria:**
+- Una secundaria contraria del mismo tamaño equivale a cerrar la principal con pérdida en ese momento: la exposición queda igual.
+- Con giros de mercado, esa pérdida se fija una y otra vez.
+- No libera más ciclos: acaban con Op4 abierta 31 recoveries, frente a 21 con la regla actual.
+
 ## Lectura
 
 - **El límite:**
@@ -48,9 +67,9 @@
 
 ## Decisión
 
-Sin cambios:
-- se mantiene el límite de 6;
+Recomendación:
+- subir el límite a 20 (solo configuración): mejor que 6 en total y en el 14-oct, y evita quedarse sin Op4 en un ciclo de tendencia larga;
+- no se quita del todo, porque frena el caso patológico de reaperturas en mercado lateral;
 - no se añade Op4 secundaria;
 - el diseño del recorte por parejas se limita al par Op1 + Op2.
 
-Subir el límite a 10 es un cambio solo de configuración (`rescue_trend_max_legs`), por si el usuario lo quiere; su efecto está dentro del ruido.
