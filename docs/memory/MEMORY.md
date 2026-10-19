@@ -26,3 +26,4 @@
 - [M5: trailing por ATR](m5-trailing-atr.md) — trailing en múltiplos del ATR de la apertura (0,5/0,3, turbo 1,25→0,15), m5_trail_mode='points' revierte; objetivos por estructura descartados; migración 013
 - [Op4 a favor del movimiento](op4-trend.md) — la Op4 abre contra la recovery que pierde (>= 2 ATR), tamaño <= neto, trailing 1,0/0,5 ATR, una a la vez y 6 por ciclo; sus ganancias curan vía Healer; rescue_mode='copy' revierte; migración 014
 - [Healer: ventana de deals atrasada](healer-deal-window-lag.md) — la ventana del M15 iba 3 h atrasada (naive = hora local); ahora + 1 día, cursor y bolsa persisten en el ciclo y la bolsa espera con Op4 (T) abierta; M5 pendiente
+- [MT5: no bajar histórico con mercado abierto](mt5-history-download-blocks-bots.md) — descargas profundas de velas contra un terminal vivo cuelgan el IPC de sus bots (19-oct, 13 min sin heartbeat en 10k); solo lecturas ligeras con mercado abierto
