@@ -46,3 +46,5 @@ metadata:
 - Ver [[healer-real-loser-bag]] y [[survival-cap-basket-lock]].
 
 **Despliegue:** migración 014 aplicada y `restart_all` el 2026-10-16 ~20:33 UTC (viernes, ~25 min antes del cierre semanal). En el primer tick las 3 cuentas abrieron `Sentinel Op 4 (T)` BUY (0,02 / 0,11 / 0,22) a ~4 168,5 contra la recovery del 14-oct (−79 $/oz, 14 ATR). Neto M15 = 0 en las tres: la pérdida queda congelada en el fin de semana. Evaluar desde el lunes 19-oct (trailing 1,0/0,5 ATR, amputaciones «Bolsa restante»).
+
+**Límite subido a 20 (19-oct-2026, a petición del usuario):** `rescue_trend_max_legs = 20` en `bot_config` (las 7 filas M15), recarga en caliente. Simulación: 20 → +398 $/oz frente a +374 con 6 y +339 sin límite; ver `docs/experimento-2/analisis-op4-limite-y-secundaria-2026-10-19.md`. La Op4 secundaria contraria («bolsa secundaria») se descartó con datos (equivale a cerrar la principal con pérdida; peor total y más ciclos congelados).
