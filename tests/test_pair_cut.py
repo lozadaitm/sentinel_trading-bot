@@ -25,9 +25,9 @@ def _pc(b):
     return [(x["ticket"], round(x["lots"], 8)) for x in b.partials if x["comment"] == strategy.PAIR_CUT_COMMENT]
 
 
-def _with_op4(rec_profit=-50.0, op4_profit=-5.0, op4_vol=0.10):
+def _with_op4(rec_profit=-50.0, op4_profit=-5.0, op4_vol=0.10, cfg=None):
     """Entry SELL -300 + Hedge BUY +10 (par), recovery SELL y Op4 (T) BUY: neto 0."""
-    e, b, log, rec, d = _cycle(rec_profit=rec_profit)
+    e, b, log, rec, d = _cycle(rec_profit=rec_profit, cfg=cfg)
     op4 = _pos(b, 4, BUY, op4_vol, 4170.0, strategy.OP4_TREND_COMMENT, profit=op4_profit)
     e.cycle.sync(b.positions())
     return e, b, log, rec, op4, d
@@ -46,13 +46,35 @@ def test_cover_pair_when_recovery_green():
 
 
 def test_recovery_op4_pair():
-    e, b, log, rec, op4, d = _with_op4()
+    e, b, log, rec, op4, d = _with_op4(cfg={"healer_pair_order": "recovery_first"})
     net0 = _net(b)
     d.win(50.0)                                     # bolsa 45; recovery+Op4 = 550 $/lote
     e._check_healing()
     check(_pc(b) == [(3, 0.08), (4, 0.08)],
           f"recovery primero: paga recovery+Op4 aunque la Op1+Op2 pierda mas por lote (got {_pc(b)})")
     check(abs(_net(b) - net0) < 1e-9, "el neto no cambia")
+
+
+def test_cover_first_default():
+    e, b, log, rec, op4, d = _with_op4()
+    net0 = _net(b)
+    d.win(50.0)                                     # bolsa 45; Op1+Op2 = 2900 $/lote => 0.01
+    e._check_healing()
+    check(_pc(b) == [(1, 0.01), (2, 0.01)],
+          f"por defecto paga primero la Op1+Op2 aunque haya recovery+Op4 valida (got {_pc(b)})")
+    check(abs(_net(b) - net0) < 1e-9, "el neto no cambia")
+
+
+def test_cover_first_falls_back_at_anchor():
+    e, b, log, rec, op4, d = _with_op4()
+    for p in b._pos[:2]:                            # Op1 y Op2 ya en el lote minimo (ancla)
+        p.profit = p.profit / p.volume * 0.01
+        p.volume = 0.01
+    d.win(50.0)                                     # bolsa 45 => recovery+Op4 a 550 $/lote: 0.08
+    e._check_healing()
+    check(_pc(b) == [(3, 0.08), (4, 0.08)],
+          f"con la Op1+Op2 en el ancla, la bolsa pasa a recovery+Op4 (got {_pc(b)})")
+    check({p.ticket: round(p.volume, 8) for p in b.positions()}.get(1) == 0.01, "el ancla queda intacta")
 
 
 def test_amputation_has_priority():
@@ -190,7 +212,8 @@ def test_switch_off():
 
 
 def main():
-    for t in (test_cover_pair_when_recovery_green, test_recovery_op4_pair, test_amputation_has_priority,
+    for t in (test_cover_pair_when_recovery_green, test_recovery_op4_pair, test_cover_first_default,
+              test_cover_first_falls_back_at_anchor, test_amputation_has_priority,
               test_never_mixes_types, test_cover_pair_keeps_anchor, test_cover_pair_closes_when_alone,
               test_budget_waits_below_min_lot, test_pair_without_real_loss_released,
               test_lock_legs_excluded, test_first_close_rejected, test_second_close_rejected_debt,

@@ -37,6 +37,7 @@ DEFAULTS = {
     "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
     "healer_min_move_usd": 2.0,       # perdedor real: >= N $/oz en contra (spec 2026-10-16; 0 = cualquier rojo)
     "healer_pair_cut": True,          # sin recovery recortable, la bolsa paga parejas opuestas (spec 2026-10-19)
+    "healer_pair_order": "cover_first",  # 'cover_first' = Op1+Op2 antes que recovery+Op4; 'recovery_first' (spec 2026-10-20)
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
     "use_pullback": True, "atr_entry_distance": 2.5, "use_h4_struct": True,
     "entry_rsi_max": 75, "entry_rsi_min": 25,
@@ -92,6 +93,9 @@ LOCK_LOOSE = "AFLOJADO"    # patas LOCK con neto residual: operativa normal, LOC
 LOCK_FAIL_LOG_EVERY_S = 600
 DISSOLVE_RETRY_S = 60       # backoff de reintento de la disolucion por parejas (R14)
 PAIR_CUT_COMMENT = "Healer Pair Cut"   # recorte por parejas del Healer (spec 2026-10-19)
+# Cierres propios del Healer y de la disolucion: no son ganancia nueva para la bolsa
+# (el recorte ya neteo su miembro verde; la disolucion no resta su miembro rojo).
+HEALER_OWN_COMMENTS = (PAIR_CUT_COMMENT, "Healer Amputacion", "Basket Dissolve")
 
 def _struct_txt(v):
     return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
@@ -1409,8 +1413,9 @@ class SentinelEngine:
                 continue
             if d.ticket > max_ticket:
                 max_ticket = d.ticket
-            if d.magic == self.b.magic and d.entry == mt5.DEAL_ENTRY_OUT and d.profit > 0:
-                budget += d.profit  # acumula los ganadores nuevos DEL CICLO
+            if (d.magic == self.b.magic and d.entry == mt5.DEAL_ENTRY_OUT and d.profit > 0
+                    and (getattr(d, "comment", "") or "") not in HEALER_OWN_COMMENTS):
+                budget += d.profit  # acumula los ganadores nuevos DEL CICLO (spec 2026-10-20: sin doble conteo)
 
         # C: presupuesto acotado al ciclo. Al arrancar un ciclo nuevo se rebasa el
         # cursor al ultimo ticket para NO contar verdes de ciclos ya cerrados. Antes
@@ -1506,20 +1511,27 @@ class SentinelEngine:
         free_pairs = [(a, b) for a in buys for b in sells]
         min_move = float(self._p("healer_min_move_usd"))
         contract = self.b.contract_size()
+        vmin = self.b.volume_min()
 
         def worst(pairs, cover):
             best = None
             for a, b in pairs:
                 if a.volume <= 0 or b.volume <= 0:
                     continue
+                if (cover and min(a.volume, b.volume) - vmin < vmin - 1e-9
+                        and self._cycle_has_other_legs(a, b)):
+                    continue   # ancla: ya no se puede recortar ni el minimo sin romperla
                 cost = -((a.profit + a.swap) / a.volume + (b.profit + b.swap) / b.volume)
                 if cost / contract < min_move - 1e-9:
                     continue   # pareja sin perdida real
                 if best is None or cost > best[0]:
                     best = (cost, a, b, cover)
             return best
-        # Recovery primero: las parejas con recovery/Op4 antes que la Op1 + su cobertura.
-        return worst(free_pairs, False) or worst(cover_pairs, True)
+        # Orden (spec 2026-10-20): por defecto la Op1 + su cobertura primero (frena el
+        # mismo swap por mucho menos dinero); 'recovery_first' = recovery/Op4 antes.
+        if str(self._p("healer_pair_order")).strip().lower() == "recovery_first":
+            return worst(free_pairs, False) or worst(cover_pairs, True)
+        return worst(cover_pairs, True) or worst(free_pairs, False)
 
     def _try_pair_cut(self):
         """Paga con la bolsa X lotes de cada miembro de la peor pareja (rojo primero)."""

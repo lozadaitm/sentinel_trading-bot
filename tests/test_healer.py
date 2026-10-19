@@ -20,10 +20,10 @@ class _Deals:
         self.items, self.next = [], 9000
         b.history_deals = lambda a, z: list(self.items)
 
-    def win(self, profit):
+    def win(self, profit, comment=""):
         self.next += 1
         self.items.append(SimpleNamespace(ticket=self.next, magic=M15,
-                                          entry=mt5.DEAL_ENTRY_OUT, profit=profit))
+                                          entry=mt5.DEAL_ENTRY_OUT, profit=profit, comment=comment))
 
 
 def _cycle(rec_profit, rec_vol=0.10, cfg=None):
@@ -206,12 +206,28 @@ def test_cycle_close_clears_persisted():
           "cierre de ciclo: estado persistido borrado")
 
 
+def test_own_closes_not_counted():
+    # spec 2026-10-20: el miembro verde de un recorte por parejas o de una disolucion
+    # ya esta neteado (o su rojo no resta): no es ganancia nueva para la bolsa.
+    e, b, log, rec, d = _cycle(rec_profit=-50.0, rec_vol=0.01)   # 50 $ por 0.01: la bolsa espera
+    d.win(30.0, "Healer Pair Cut")
+    d.win(20.0, "Basket Dissolve")
+    d.win(5.0, "Healer Amputacion")
+    e._check_healing()
+    check(e.healer_budget == 0.0, f"cierres propios: la bolsa no suma (got {e.healer_budget})")
+    d.win(10.0)
+    e._check_healing()
+    check(abs(e.healer_budget - 9.0) < 1e-9, f"un ganador normal si suma el 90 % (got {e.healer_budget})")
+    check(e.last_healed_ticket == d.next, "el cursor avanza tambien sobre los cierres propios")
+
+
 def main():
     for t in (test_fresh_recovery_not_amputated, test_real_loser_amputated, test_little_by_little,
               test_budget_released, test_gain_before_loser_not_used, test_ninety_percent,
               test_cycle_close_resets, test_switch_off, test_protections_intact, test_window_not_lagged,
               test_op4_open_budget_waits, test_state_survives_restart,
-              test_restart_without_positions_ignores_meta, test_cycle_close_clears_persisted):
+              test_restart_without_positions_ignores_meta, test_cycle_close_clears_persisted,
+              test_own_closes_not_counted):
         print(t.__name__)
         t()
     print("\ntest_healer: TODO OK")

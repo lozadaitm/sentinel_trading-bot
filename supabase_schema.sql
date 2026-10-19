@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     rescue_trend_trail_start_atr DOUBLE PRECISION DEFAULT 1.0,
     rescue_trend_trail_dist_atr  DOUBLE PRECISION DEFAULT 0.5,
     healer_pair_cut              BOOLEAN          DEFAULT true,   -- migracion 015
+    healer_pair_order            TEXT             DEFAULT 'cover_first',   -- migracion 016
     use_recovery_h4_gate    BOOLEAN          DEFAULT true,
 
     -- 10. Otros

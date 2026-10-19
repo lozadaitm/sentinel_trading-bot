@@ -139,6 +139,8 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
 
     -- 15. Recorte por parejas del Healer (migracion 015)
     healer_pair_cut              BOOLEAN          DEFAULT true,
+    -- 16. Orden del recorte por parejas (migracion 016)
+    healer_pair_order            TEXT             DEFAULT 'cover_first',
 
     UNIQUE (user_id, symbol)
 );
