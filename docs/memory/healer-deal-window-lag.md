@@ -19,3 +19,5 @@ metadata:
 **Pendiente:** el M5 (`strategy_m5.py`, `_refresh_last_trade_result`) tiene el mismo retraso de 3 h para saber si su última operación fue ganadora. No se tocó: cambia entradas del M5 en plena evaluación del trailing ATR; decidir con el usuario.
 
 Relacionado: [[op4-trend]], [[healer-real-loser-bag]].
+
+**Despliegue (19-oct-2026, ~00:05 UTC):** el primer arreglo (4c28e9d) no bastó porque `_check_healing` calculaba su propia ventana; corregido en 2dfec24. Tras el reinicio, el Healer restauró el cursor sembrado y dejó en espera la bolsa de las dos primeras Op4 (T) (237 $ en 10k, 119 $ en 5k, 21 $ en 1k) mientras la 3.ª Op4 sigue abierta.
