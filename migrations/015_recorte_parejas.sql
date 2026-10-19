@@ -12,7 +12,7 @@
 -- Evidencia: docs/experimento-2/analisis-ciclo-paralelo-2026-10-19.md
 --            docs/experimento-2/analisis-limite-op4-y-entrada-op1-2026-10-19.md
 --
--- ESTADO: PENDIENTE de aplicar en Supabase (SQL Editor). Idempotente.
+-- ESTADO: APLICADA en Supabase el 2026-10-19 (SQL Editor). Idempotente.
 -- Sin aplicarla, el bot usa los DEFAULT de bot/strategy.py (recorte activo).
 -- ==================================================================
 
