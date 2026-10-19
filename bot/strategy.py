@@ -1484,7 +1484,7 @@ class SentinelEngine:
     # RECORTE POR PAREJAS (spec 2026-10-19-recorte-por-parejas)
     # ==============================================================
     def _pair_cut_candidate(self, positions):
-        """Pareja opuesta con mas perdida real por lote: (coste_por_lote, a, b) o None.
+        """Pareja opuesta con mas perdida real por lote: (coste_por_lote, a, b, es_cobertura) o None.
 
         Parejas validas, nunca mezcladas: (a) un HEDGE y la pata que cubre, segun
         el ledger; (b) una RECOVERY/RESCUE de cada lado, fuera de toda pareja de
@@ -1507,7 +1507,7 @@ class SentinelEngine:
         min_move = float(self._p("healer_min_move_usd"))
         contract = self.b.contract_size()
 
-        def worst(pairs):
+        def worst(pairs, cover):
             best = None
             for a, b in pairs:
                 if a.volume <= 0 or b.volume <= 0:
@@ -1516,10 +1516,10 @@ class SentinelEngine:
                 if cost / contract < min_move - 1e-9:
                     continue   # pareja sin perdida real
                 if best is None or cost > best[0]:
-                    best = (cost, a, b)
+                    best = (cost, a, b, cover)
             return best
         # Recovery primero: las parejas con recovery/Op4 antes que la Op1 + su cobertura.
-        return worst(free_pairs) or worst(cover_pairs)
+        return worst(free_pairs, False) or worst(cover_pairs, True)
 
     def _try_pair_cut(self):
         """Paga con la bolsa X lotes de cada miembro de la peor pareja (rojo primero)."""
@@ -1528,10 +1528,16 @@ class SentinelEngine:
         best = self._pair_cut_candidate(self.b.positions())
         if best is None or self.healer_budget <= 0:
             return
-        cost, a, b = best
+        cost, a, b, cover = best
         step, vmin = self.b.volume_step(), self.b.volume_min()
         lots = math.floor(self.healer_budget / cost / step + 1e-9) * step
         lots = round(min(lots, a.volume, b.volume), 8)
+        if cover and self._cycle_has_other_legs(a, b):
+            # La Op1 + su cobertura son el ancla del ciclo: con recovery/Op4 vivas no
+            # se cierran del todo (quedaria un ciclo de 2 patas sin ENTRY que la
+            # maquina leeria como ESTADO 2 y podria abrir otra recovery, y el Healer
+            # dejaria de correr por healer_min_core). Queda >= el lote minimo de cada.
+            lots = round(min(lots, math.floor((min(a.volume, b.volume) - vmin) / step + 1e-9) * step), 8)
         if lots < vmin - 1e-9:
             return   # no llega ni al lote minimo: la bolsa espera (no se libera)
         if self.b.shadow:
@@ -1570,6 +1576,11 @@ class SentinelEngine:
                        f"Recorte por parejas: {closed1:.2f} lotes de #{first.ticket} + #{second.ticket} "
                        f"({realized:.2f} $). Bolsa restante: {self.healer_budget:.2f} $",
                        realized, closed1, self.b.account_balance(), ticket=first.ticket)
+
+    def _cycle_has_other_legs(self, a, b):
+        """True si el ciclo tiene patas (no LOCK) aparte de `a` y `b`."""
+        legs = self.cycle.cycle_legs(self.b.positions())
+        return any(p.ticket not in (a.ticket, b.ticket) for p in legs)
 
     def _retry_pair_cut_pending(self):
         """Reintenta cerrar el resto del segundo miembro, sin pasarse del neto previo."""

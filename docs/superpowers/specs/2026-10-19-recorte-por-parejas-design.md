@@ -77,15 +77,20 @@ No se mezclan tipos: por ejemplo, la Op1 nunca se empareja con una Op4. En la si
 ### 3.3 Recorte
 
 1. `lotes = floor(bolsa / coste / paso) · paso`, sin pasar de `min(vol_a, vol_b)`.
-2. Si `lotes < lote mínimo`, no se cierra nada y **la bolsa espera**: no se libera mientras exista la pareja.
-3. Se cierra **primero el miembro rojo** y luego el verde, con los mismos lotes.
+2. **Ancla del ciclo:** si la pareja es Op1 + su cobertura y quedan otras patas del ciclo (recovery u Op4), no se cierra del todo. Se deja al menos el lote mínimo de cada una.
+   - Si se cerrara entera, quedaría un ciclo de 2 patas sin ENTRY. La máquina de estados lo leería como ESTADO 2 y podría abrir otra recovery.
+   - Además, el curador dejaría de correr, porque `healer_min_core` es 3.
+   - Cuando ya no quedan otras patas, la pareja se puede pagar entera.
+   - *Lo detectó el usuario el 19-oct al preguntar si podían quedar patas «viudas».*
+3. Si `lotes < lote mínimo`, no se cierra nada y **la bolsa espera**: no se libera mientras exista la pareja.
+4. Se cierra **primero el miembro rojo** y luego el verde, con los mismos lotes.
    - Se reutiliza `_dissolve_close`, con el comentario de orden parametrizado: `Healer Pair Cut`.
    - Si falla el primero, no se cierra nada y se reintenta en `DISSOLVE_RETRY_S`.
-4. Contabilidad:
+5. Contabilidad:
    - lo realizado (suma de las dos partes) va a `cycle_realized`;
    - la bolsa baja exactamente en la pérdida realizada.
-5. Log `HEALER`: «Recorte por parejas: X lotes de #A + #B (−Y $). Bolsa restante Z $.»
-6. Como mucho una pareja por tick. La siguiente se hace en el tick siguiente, si la bolsa alcanza.
+6. Log `HEALER`: «Recorte por parejas: X lotes de #A + #B (−Y $). Bolsa restante Z $.»
+7. Como mucho una pareja por tick. La siguiente se hace en el tick siguiente, si la bolsa alcanza.
 
 ### 3.4 Fallo del segundo cierre
 

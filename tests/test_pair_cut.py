@@ -70,11 +70,34 @@ def test_amputation_has_priority():
 
 def test_never_mixes_types():
     e, b, log, rec, op4, d = _with_op4(rec_profit=+30.0, op4_profit=-30.0)   # rec+Op4 sin perdida real
-    d.win(500.0)
+    d.win(100.0)
+    e._check_healing()
+    check(_pc(b) == [(1, 0.03), (2, 0.03)],
+          f"paga la pareja de cobertura; recovery y Op4 intactas: nunca Op1 con Op4 (got {_pc(b)})")
+
+
+def test_cover_pair_keeps_anchor():
+    # recovery + Op4 casi empatadas (pareja sin perdida real): la bolsa va a Op1+Op2,
+    # pero con recovery/Op4 vivas nunca las cierra del todo (no deja un ciclo sin ENTRY).
+    e, b, log, rec, op4, d = _with_op4(rec_profit=+30.0, op4_profit=-30.0)
+    d.win(5000.0)
     e._check_healing()
     alive = {p.ticket: round(p.volume, 8) for p in b.positions()}
-    check(alive == {3: 0.10, 4: 0.10},
-          f"paga la pareja de cobertura entera; recovery y Op4 intactas: nunca Op1 con Op4 (got {alive})")
+    check(alive == {1: 0.01, 2: 0.01, 3: 0.10, 4: 0.10},
+          f"Op1+Op2 recortadas hasta el lote minimo; recovery y Op4 intactas (got {alive})")
+    e.now += 61
+    e._check_healing()
+    check({p.ticket: round(p.volume, 8) for p in b.positions()} == alive, "no baja del minimo en ticks siguientes")
+
+
+def test_cover_pair_closes_when_alone():
+    e, b, log, rec, d = _cycle(rec_profit=+20.0)
+    b._pos.remove(rec)                              # sin recovery: el ciclo es solo Op1 + Op2
+    e.cycle.sync(b.positions())
+    e.cfg["healer_min_core"] = 2
+    d.win(5000.0)
+    e._check_healing()
+    check(not b.positions(), f"sin otras patas, la pareja se paga entera (got {[(p.ticket, p.volume) for p in b.positions()]})")
 
 
 def test_budget_waits_below_min_lot():
@@ -168,7 +191,8 @@ def test_switch_off():
 
 def main():
     for t in (test_cover_pair_when_recovery_green, test_recovery_op4_pair, test_amputation_has_priority,
-              test_never_mixes_types, test_budget_waits_below_min_lot, test_pair_without_real_loss_released,
+              test_never_mixes_types, test_cover_pair_keeps_anchor, test_cover_pair_closes_when_alone,
+              test_budget_waits_below_min_lot, test_pair_without_real_loss_released,
               test_lock_legs_excluded, test_first_close_rejected, test_second_close_rejected_debt,
               test_vol_breaker_blocks, test_switch_off):
         print(t.__name__)
