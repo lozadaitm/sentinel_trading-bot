@@ -23,7 +23,7 @@ def _bars(e, close1, t=T0):
 
 def _cycle(close1, sell=True, rec_vol=0.22, equity=50000.0, cfg=None):
     """Ciclo del 14-oct: entrada + cobertura (par congelado) + recovery perdiendo."""
-    c = {"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False}
+    c = {"equity_weight": 1.0, "rescue_cooldown": 0, "news_enforce": False, "rescue_trend_max_legs": 6}
     c.update(cfg or {})
     e, b, log = _eng(equity=equity, cfg=c)
     b._next = 500

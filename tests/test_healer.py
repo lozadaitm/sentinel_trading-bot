@@ -28,7 +28,9 @@ class _Deals:
 
 def _cycle(rec_profit, rec_vol=0.10, cfg=None):
     """Ciclo real del 14-oct: SELL entry + Hedge BUY (par congelado) + recovery SELL."""
-    c = {"equity_weight": 1.0}
+    # healer_pair_cut off: estos tests fijan la regla de "perdedor real" (spec 2026-10-16);
+    # el recorte por parejas tiene los suyos en tests/test_pair_cut.py.
+    c = {"equity_weight": 1.0, "healer_pair_cut": False}
     c.update(cfg or {})
     e, b, log = _eng(equity=10000.0, cfg=c)
     e.now = 1_790_000_000

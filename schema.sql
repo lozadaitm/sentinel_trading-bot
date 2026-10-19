@@ -133,9 +133,12 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     -- 14. Op4 a favor del movimiento (migracion 014)
     rescue_mode                  TEXT             DEFAULT 'trend',
     rescue_trend_k_atr           DOUBLE PRECISION DEFAULT 2.0,
-    rescue_trend_max_legs        INTEGER          DEFAULT 6,
+    rescue_trend_max_legs        INTEGER          DEFAULT 1000,
     rescue_trend_trail_start_atr DOUBLE PRECISION DEFAULT 1.0,
     rescue_trend_trail_dist_atr  DOUBLE PRECISION DEFAULT 0.5,
+
+    -- 15. Recorte por parejas del Healer (migracion 015)
+    healer_pair_cut              BOOLEAN          DEFAULT true,
 
     UNIQUE (user_id, symbol)
 );

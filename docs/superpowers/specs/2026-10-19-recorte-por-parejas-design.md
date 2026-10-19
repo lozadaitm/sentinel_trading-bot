@@ -1,6 +1,6 @@
 # Diseño: recorte por parejas en el curador (Healer)
 
-**Estado:** PROPUESTA, pendiente de aprobación del usuario.
+**Estado:** APROBADO por el usuario el 2026-10-19, con la condición de «recovery primero, parejas después».
 
 **Rama:** `experimento-2-rediseno`.
 
@@ -71,7 +71,8 @@ No se mezclan tipos: por ejemplo, la Op1 nunca se empareja con una Op4. En la si
 
 **Pérdida de la pareja por lote:** `coste = −(dinero_a / vol_a + dinero_b / vol_b)`, con `dinero = profit + swap`.
 - La pareja es válida si `coste / tamaño_contrato ≥ healer_min_move_usd` (2 $/oz, la misma regla de «perdedor real»).
-- Si hay varias, se elige la de **mayor coste por lote**.
+- **Recovery primero:** se usan antes las parejas de tipo (b), que contienen la recovery o la Op4. Las de tipo (a) solo se usan cuando no hay ninguna (b) válida. *Decisión mía, a partir de la condición del usuario.*
+- Dentro del mismo tipo, se elige la de **mayor coste por lote**.
 
 ### 3.3 Recorte
 

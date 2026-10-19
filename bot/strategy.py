@@ -36,6 +36,7 @@ DEFAULTS = {
     "use_dynamic_hedge": True, "hedge_dist": 800, "hedge_atr_mult": 2.0,  # suelo 800 pt = 8 $ (spec 2026-10-15)
     "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
     "healer_min_move_usd": 2.0,       # perdedor real: >= N $/oz en contra (spec 2026-10-16; 0 = cualquier rojo)
+    "healer_pair_cut": True,          # sin recovery recortable, la bolsa paga parejas opuestas (spec 2026-10-19)
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
     "use_pullback": True, "atr_entry_distance": 2.5, "use_h4_struct": True,
     "entry_rsi_max": 75, "entry_rsi_min": 25,
@@ -73,7 +74,7 @@ DEFAULTS = {
     # --- Op4 a favor del movimiento (spec 2026-10-16-op4-tendencia) ---
     "rescue_mode": "trend",           # 'trend' = contra la pata que pierde (reduce el neto); 'copy' = martingala vieja
     "rescue_trend_k_atr": 2.0,        # dispara con la recovery/rescue a >= K*ATR M15 en contra (cierre de vela)
-    "rescue_trend_max_legs": 6,       # cupo de Op4 por ciclo en modo trend (cuenta rescue_opened)
+    "rescue_trend_max_legs": 1000,     # cupo de Op4 (T) por ciclo: sin limite en la practica (19-oct, sim ciclo completo)
     "rescue_trend_trail_start_atr": 1.0,  # trailing propio de la Op4 (T): arranque en ATR
     "rescue_trend_trail_dist_atr": 0.5,   # y distancia en ATR (sin turbo)
 }
@@ -90,6 +91,7 @@ LOCK_FROZEN = "CONGELADO"  # patas LOCK y neto propio 0: nada cambia el neto
 LOCK_LOOSE = "AFLOJADO"    # patas LOCK con neto residual: operativa normal, LOCK intocable
 LOCK_FAIL_LOG_EVERY_S = 600
 DISSOLVE_RETRY_S = 60       # backoff de reintento de la disolucion por parejas (R14)
+PAIR_CUT_COMMENT = "Healer Pair Cut"   # recorte por parejas del Healer (spec 2026-10-19)
 
 def _struct_txt(v):
     return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
@@ -160,6 +162,7 @@ class SentinelEngine:
         self._unlock_err_next = 0     # throttle del ERROR/SHADOW del aflojado del candado
         self._dissolve_err_next = 0   # throttle del ERROR/SHADOW de la disolucion por parejas
         self._dissolve_retry_next = 0 # backoff (60 s) de reintentos de la disolucion
+        self._pair_cut_retry_next = 0 # backoff (60 s) del recorte por parejas del Healer
         self._hedge_fail_next = {}    # ticket -> proximo ERROR de "Hedge Lock FALLIDO"
         self._surv_unknown_next_log = 0  # throttle del aviso "cuenta no evaluable" del candado
         self._empty_reads = 0         # lecturas vacias CONFIRMADAS seguidas (reset de meta a la 2.a)
@@ -1023,7 +1026,7 @@ class SentinelEngine:
     def _tickets_txt(tickets):
         return ", ".join(f"#{t}" for t in tickets)
 
-    def _dissolve_close(self, member, lots, step):
+    def _dissolve_close(self, member, lots, step, comment="Basket Dissolve"):
         """Cierra `lots` de las patas de un miembro (en orden). Cuenta lo
         confirmado con retcode DONE y, en un DONE_PARTIAL, el volumen REALMENTE
         cerrado (res.volume o, si no viene, releyendo la posicion), para que el
@@ -1038,9 +1041,9 @@ class SentinelEngine:
             pl_per_lot = (p.profit + p.swap) / p.volume if p.volume > 0 else 0.0
             ticket = p.ticket
             if take >= p.volume - 1e-9:
-                res = self.b.close_position(p, "Basket Dissolve")
+                res = self.b.close_position(p, comment)
             else:
-                res = self.b.close_partial(p, take, "Basket Dissolve")
+                res = self.b.close_partial(p, take, comment)
             rc = getattr(res, "retcode", None)
             if rc == mt5.TRADE_RETCODE_DONE_PARTIAL:
                 got = self._partial_closed_volume(res, ticket, vol_before, take, step)
@@ -1437,6 +1440,19 @@ class SentinelEngine:
         # habia ganado la anterior.
         positions = self.b.positions()
         no_target = self._healer_target(positions)[0] is None
+        if self.cycle.get_meta("pair_cut_pending"):
+            # Pareja a medias: neto desviado. Solo se repara; la bolsa acumula y
+            # ni se amputa ni se empieza otra pareja hasta cerrar la deuda.
+            self.healer_budget += 0.90 * budget
+            self._retry_pair_cut_pending()
+            return
+        # Recovery primero (spec 2026-10-19): con perdedor real amputable manda la
+        # amputacion de siempre, aunque la bolsa aun no llegue al lote minimo.
+        # Solo SIN el, la bolsa puede pagar una pareja opuesta.
+        if no_target and self._p("healer_pair_cut") and self._pair_cut_candidate(positions) is not None:
+            self.healer_budget += 0.90 * budget
+            self._try_pair_cut()
+            return
         if no_target and any(self._is_trend_op4(p) for p in positions):
             # Op4 (T) viva: la recovery esta cubierta por ella (cerrarla subiria la
             # exposicion), no "curada". La bolsa espera a que la Op4 cierre y entonces
@@ -1463,6 +1479,134 @@ class SentinelEngine:
         if self.healer_budget > 0:
             spent = self._apply_healing(self.healer_budget)
             self.healer_budget = max(0.0, self.healer_budget - spent)
+
+    # ==============================================================
+    # RECORTE POR PAREJAS (spec 2026-10-19-recorte-por-parejas)
+    # ==============================================================
+    def _pair_cut_candidate(self, positions):
+        """Pareja opuesta con mas perdida real por lote: (coste_por_lote, a, b) o None.
+
+        Parejas validas, nunca mezcladas: (a) un HEDGE y la pata que cubre, segun
+        el ledger; (b) una RECOVERY/RESCUE de cada lado, fuera de toda pareja de
+        cobertura (recovery + Op4 (T)). Sin patas LOCK. Cerrar lotes iguales de
+        ambos miembros no cambia el neto. Mezclar tipos (p. ej. Op1 con Op4) hacia
+        que _resize_hedge recortara despues la cobertura y movia el neto.
+        """
+        lock = {p.ticket for p in self.cycle.lock_legs(positions)}
+        live = [p for p in positions if p.ticket not in lock]
+        cover_pairs, in_pair = [], set()
+        for leg, hedge in self.cycle.pairs(live):
+            if leg.type != hedge.type:
+                cover_pairs.append((leg, hedge))
+                in_pair |= {leg.ticket, hedge.ticket}
+        free = [p for p in live if p.ticket not in in_pair
+                and self.cycle.role_of(p.ticket) in (ledger.ROLE_RECOVERY, ledger.ROLE_RESCUE)]
+        buys = [p for p in free if p.type == mt5.POSITION_TYPE_BUY]
+        sells = [p for p in free if p.type == mt5.POSITION_TYPE_SELL]
+        free_pairs = [(a, b) for a in buys for b in sells]
+        min_move = float(self._p("healer_min_move_usd"))
+        contract = self.b.contract_size()
+
+        def worst(pairs):
+            best = None
+            for a, b in pairs:
+                if a.volume <= 0 or b.volume <= 0:
+                    continue
+                cost = -((a.profit + a.swap) / a.volume + (b.profit + b.swap) / b.volume)
+                if cost / contract < min_move - 1e-9:
+                    continue   # pareja sin perdida real
+                if best is None or cost > best[0]:
+                    best = (cost, a, b)
+            return best
+        # Recovery primero: las parejas con recovery/Op4 antes que la Op1 + su cobertura.
+        return worst(free_pairs) or worst(cover_pairs)
+
+    def _try_pair_cut(self):
+        """Paga con la bolsa X lotes de cada miembro de la peor pareja (rojo primero)."""
+        if self.vol_breaker or self.now < self._pair_cut_retry_next:
+            return
+        best = self._pair_cut_candidate(self.b.positions())
+        if best is None or self.healer_budget <= 0:
+            return
+        cost, a, b = best
+        step, vmin = self.b.volume_step(), self.b.volume_min()
+        lots = math.floor(self.healer_budget / cost / step + 1e-9) * step
+        lots = round(min(lots, a.volume, b.volume), 8)
+        if lots < vmin - 1e-9:
+            return   # no llega ni al lote minimo: la bolsa espera (no se libera)
+        if self.b.shadow:
+            self.log.write("SHADOW", f"Recorte por parejas (sombra): {lots:.2f} lotes de "
+                                     f"#{a.ticket} + #{b.ticket}.", balance=self.b.account_balance())
+            return
+
+        def pl(p):
+            return (p.profit + p.swap) / p.volume * lots
+        first, second = (a, b) if pl(a) <= pl(b) else (b, a)
+        net_before = survival.net_lots(self.b.positions())
+        closed1, real1, fail1, _tk1 = self._dissolve_close([first], lots, step, PAIR_CUT_COMMENT)
+        if closed1 <= 0:
+            self._pair_cut_retry_next = self.now + DISSOLVE_RETRY_S
+            self._dissolve_error(f"Recorte por parejas RECHAZADO en #{fail1} (nada cerrado). "
+                                 f"Se reintenta en {DISSOLVE_RETRY_S} s.")
+            return
+        closed2, real2, fail2, _tk2 = self._dissolve_close([second], closed1, step, PAIR_CUT_COMMENT)
+        realized = real1 + real2
+        self.cycle_realized += realized
+        self.healer_budget = max(0.0, self.healer_budget + realized)
+        remaining = round(closed1 - closed2, 8)
+        if remaining >= step - 1e-9:
+            side = "BUY" if second.type == mt5.POSITION_TYPE_BUY else "SELL"
+            self.cycle.set_meta("pair_cut_pending", {
+                "side": side, "lots": remaining, "tickets": [second.ticket], "net_before": net_before})
+            self._pair_cut_retry_next = self.now + DISSOLVE_RETRY_S
+            msg = (f"Recorte por parejas INCOMPLETO: cerrados {closed1:.2f} de #{first.ticket} y "
+                   f"{closed2:.2f} de #{second.ticket} (rechazo en #{fail2}). Se reintenta cerrar "
+                   f"los {remaining:.2f} lotes restantes ({side}).")
+            self._dissolve_error(msg)
+            self.alerts.notify("recorte_parejas_fallido", "CRITICA", "recorte por parejas FALLIDO",
+                               f"{msg} Mientras tanto la cesta queda {remaining:.2f} lotes fuera de neto.")
+            return
+        self.log.write("HEALER",
+                       f"Recorte por parejas: {closed1:.2f} lotes de #{first.ticket} + #{second.ticket} "
+                       f"({realized:.2f} $). Bolsa restante: {self.healer_budget:.2f} $",
+                       realized, closed1, self.b.account_balance(), ticket=first.ticket)
+
+    def _retry_pair_cut_pending(self):
+        """Reintenta cerrar el resto del segundo miembro, sin pasarse del neto previo."""
+        if self.vol_breaker or self.now < self._pair_cut_retry_next:
+            return
+        pend = self.cycle.get_meta("pair_cut_pending")
+        ptype = mt5.POSITION_TYPE_BUY if pend["side"] == "BUY" else mt5.POSITION_TYPE_SELL
+        cur = self.b.positions_checked()
+        if cur is None:
+            return   # lectura fallida: nunca descartar la deuda por una lista vacia falsa
+        alive = [p for p in cur if p.ticket in pend["tickets"] and p.type == ptype]
+        step = self.b.volume_step()
+        net = survival.net_lots(cur)
+        gap = (net - float(pend["net_before"])) if ptype == mt5.POSITION_TYPE_BUY \
+            else (float(pend["net_before"]) - net)
+        lots = round(min(float(pend["lots"]), math.floor(max(gap, 0.0) / step + 1e-9) * step), 8)
+        if not alive or lots < step - 1e-9:
+            self.cycle.set_meta("pair_cut_pending", None)
+            why = "sus patas ya no existen" if not alive else "el neto ya volvio al valor previo"
+            self.log.write("HEALER", f"Recorte por parejas: deuda pendiente descartada ({why}).",
+                           balance=self.b.account_balance())
+            return
+        if self.b.shadow:
+            return
+        closed, real, fail, _tk = self._dissolve_close(alive, lots, step, PAIR_CUT_COMMENT)
+        self.cycle_realized += real
+        self.healer_budget = max(0.0, self.healer_budget + real)
+        rest = round(float(pend["lots"]) - closed, 8)
+        if fail is not None and rest >= step - 1e-9:
+            self.cycle.set_meta("pair_cut_pending", dict(pend, lots=rest))
+            self._pair_cut_retry_next = self.now + DISSOLVE_RETRY_S
+            self._dissolve_error(f"Recorte por parejas: reintento RECHAZADO en #{fail}. "
+                                 f"Quedan {rest:.2f} lotes por cerrar.")
+            return
+        self.cycle.set_meta("pair_cut_pending", None)
+        self.log.write("HEALER", f"Recorte por parejas: deuda pendiente cerrada ({closed:.2f} lotes).",
+                       lots=closed, balance=self.b.account_balance())
 
     def _save_healer_state(self, clear=False):
         """Persiste cursor y bolsa del Healer en el meta del ciclo (solo si cambian)."""
