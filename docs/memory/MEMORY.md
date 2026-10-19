@@ -28,3 +28,5 @@
 - [Healer: ventana de deals atrasada](healer-deal-window-lag.md) — la ventana del M15 iba 3 h atrasada (naive = hora local); ahora + 1 día, cursor y bolsa persisten en el ciclo y la bolsa espera con Op4 (T) abierta; M5 pendiente
 - [MT5: no bajar histórico con mercado abierto](mt5-history-download-blocks-bots.md) — descargas profundas de velas contra un terminal vivo cuelgan el IPC de sus bots (19-oct, 13 min sin heartbeat en 10k); solo lecturas ligeras con mercado abierto
 - [Healer: recorte por parejas](healer-pair-cut.md) — sin recovery recortable, la bolsa paga lotes iguales de patas opuestas (desde 20-oct Op1+Op2 primero, luego recovery+Op4); neto intacto; bolsa ignora cierres propios; deuda persistida si falla; migraciones 015/016
+- [Reporte diario](daily-report.md) — scripts/daily_report.py por correo, L-V 22:15 UTC (tarea SentinelDailyReport); solo lectura; revisar tras el cambio de hora de Israel 25-oct
+- [Simulador de ciclo completo](fullsim-simulator.md) — bot_backtesting/fullsim con el motor real (lab, signals, meta_label); datos fuera de git; medir antes de proponer
