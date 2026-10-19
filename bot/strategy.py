@@ -1964,9 +1964,18 @@ class SentinelEngine:
             active_dist = (current_atr * float(self._p("op3_turbo_dist_atr"))) / point
         return start_pts, active_dist
 
-    @staticmethod
-    def _is_trend_op4(p):
-        return (p.comment or "").startswith(OP4_TREND_COMMENT)
+    def _is_trend_op4(self, p):
+        """Op4 tendencia por comentario o, en modo trend, por ROL del ledger.
+
+        Tras un cierre parcial el broker reescribe el comentario de lo que queda
+        con el de la orden de cierre ("Healer Pair Cut", "Healer Amputacion"): el
+        19-oct la Op4 (T) dejo de reconocerse por comentario. En modo trend no se
+        abren Op4 de copia, asi que toda pata RESCUE del ledger es una Op4 (T).
+        """
+        if (p.comment or "").startswith(OP4_TREND_COMMENT):
+            return True
+        return (str(self._p("rescue_mode")).strip().lower() == "trend"
+                and self.cycle.role_of(p.ticket) == ledger.ROLE_RESCUE)
 
     def _check_rescue_trend(self, positions):
         """Op4 tendencia (spec 2026-10-16-op4-tendencia): en vez de copiar la

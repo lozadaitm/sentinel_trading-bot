@@ -176,6 +176,23 @@ def test_healer_chain():
     check(len(o) == 2 and abs(o[1]["lots"] - 0.18) < 1e-9, f"la siguiente Op4 (T) es del volumen restante (got {o})")
 
 
+def test_op4_recognized_after_partial_close():
+    # El broker reescribe el comentario tras un cierre parcial ("Healer Pair Cut"):
+    # la Op4 (T) se sigue reconociendo por su rol en el ledger.
+    e, b, log, _ = _cycle(4090.0 + 3 * ATR)
+    op4 = _pos(b, 4, BUY, 0.10, 4100.0, strategy.OP4_TREND_COMMENT, t=T0 - 6000)
+    e.cycle.sync(b.positions())
+    op4.comment = "Healer Pair Cut"
+    check(e._is_trend_op4(op4), "Op4 (T) reconocida por rol tras cambiar el comentario")
+    st, ds = e._op3_trail_params(op4, 5000, ATR, 0.01)
+    check(abs(ds - 200) < 1e-9, f"mantiene su trailing 1.0/0.5 sin turbo (got {ds})")
+    rec = b._pos[2]
+    rec.comment = "Healer Pair Cut"
+    check(not e._is_trend_op4(rec), "la recovery (rol RECOVERY) no pasa a ser Op4")
+    e._check_rescue(_legs(b))
+    check(not _t_orders(b), "con esa Op4 viva no se abre otra")
+
+
 def test_copy_switch():
     e, b, log, _ = _cycle(4090.0 + 3 * ATR, cfg={"rescue_mode": "copy"})
     e._check_rescue(_legs(b))
@@ -191,7 +208,7 @@ def test_survival_lets_it_pass():
 def main():
     for t in (test_trigger, test_size, test_direction_mirror, test_one_at_a_time, test_cap, test_gates,
               test_pair_not_target, test_once_per_bar, test_trailing_params, test_healer_chain,
-              test_copy_switch, test_survival_lets_it_pass):
+              test_op4_recognized_after_partial_close, test_copy_switch, test_survival_lets_it_pass):
         print(t.__name__)
         t()
     print("\ntest_op4_trend: TODO OK")
