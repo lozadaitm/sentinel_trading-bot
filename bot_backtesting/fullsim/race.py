@@ -15,6 +15,7 @@ al maximo de patas (eq_cap) para separar lo perdido antes y despues de agotar el
 Uso (desde la raiz del repo, o de un worktree con este archivo copiado):
   python -m bot_backtesting.fullsim.race <etiqueta> [--balance 1000] [--step 7] [--from 2021-03-01]
          [--to 2026-08-15] [--set clave=valor,...] [--workers 3] [--only race_x.pkl:quema]
+         [--guard cap,k,u]
 Datos: data/bars_all.pkl (entrylab build). FULLSIM_DATA permite apuntar a otra carpeta.
 """
 import argparse
@@ -31,6 +32,49 @@ from bot_backtesting.fullsim.harness import (DATA, MAGIC_A, RESULTS, SYMBOL_SPEC
                                              load_symbol, mt5)
 
 TARGET, BURN, MAX_DAYS = 2.0, 0.30, 120
+MAGIC_G = 100999   # guardian (fuera del motor): candado tras agotar el rescate
+
+
+class Guard:
+    """Candado externo al motor (otro magic, el motor no lo gestiona).
+
+    Cuando el ciclo del motor tiene >= `cap` patas y exposicion neta, y el precio se aleja
+    `k` ATR diarios mas en contra desde el precio al llegar al tope, abre la cobertura del
+    neto (congela la perdida). La suelta cuando el precio vuelve `u` ATR a favor del nivel del
+    candado (re-expone el ciclo), y la cierra si el motor queda sin posiciones.
+    """
+
+    def __init__(self, br, cap, k, u):
+        self.br, self.cap, self.k, self.u = br, cap, k, u
+        self.cap_px = None
+        self.locks = 0
+
+    def step(self, atr_d):
+        br = self.br
+        eng = [p for p in br._positions if p.magic == MAGIC_A]
+        mine = [p for p in br._positions if p.magic == MAGIC_G]
+        if not eng:
+            for p in mine:
+                br.close_position(p, "Guard Release")
+            self.cap_px = None
+            return
+        net = sum(p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume for p in eng)
+        px = br.bid()
+        if len(eng) >= self.cap and self.cap_px is None:
+            self.cap_px = px
+        if mine:
+            lk = mine[0]
+            side = -1 if lk.type == mt5.POSITION_TYPE_BUY else 1          # lado del neto cubierto
+            if (px - lk.price_open) * side >= self.u * atr_d:
+                br.close_position(lk, "Guard Release")
+            return
+        if self.cap_px is None or abs(net) < 1e-6 or not atr_d == atr_d:
+            return
+        side = 1 if net > 0 else -1
+        if (self.cap_px - px) * side >= self.k * atr_d:
+            br.market_order(mt5.ORDER_TYPE_SELL if side > 0 else mt5.ORDER_TYPE_BUY, round(abs(net), 2), "Guard Lock")
+            br._positions[-1].magic = MAGIC_G
+            self.locks += 1
 
 
 def _frames():
@@ -46,7 +90,8 @@ def _atr_d1(d1):
 
 
 def one_run(args):
-    start, balance, params, label = args
+    start, balance, params, label = args[:4]
+    guard_cfg = args[4] if len(args) > 4 else None
     from bot import strategy
     from bot.logger import Logger
     frames, d1 = _frames()
@@ -56,6 +101,7 @@ def one_run(args):
     br = MultiBroker(market, SYMBOL_SPECS, log, balance, *load_symbol())
     E = Eng(View(br, MAGIC_A), log, market, MAGIC_A)
     E.cfg = {**strategy.DEFAULTS, "news_enforce": False, **params}
+    G = Guard(br, *guard_cfg) if guard_cfg else None
     i0 = market.start_index_for(start)
     i1 = market.start_index_for(start + MAX_DAYS * 86400)
     cycles, cur = [], None
@@ -69,6 +115,9 @@ def one_run(args):
         br.process_bar_sl(); br.mark_to_market()
         E.on_tick()
         br.mark_to_market()
+        if G is not None:
+            G.step(float(atr_d.get(market.current_time // 86400 - 1, np.nan)))
+            br.mark_to_market()
         pos = br._positions
         eq = br.account_equity()
         if cur is not None:
@@ -108,7 +157,7 @@ def one_run(args):
         cycles.append(cur)
     t_end = t_end or market.current_time
     return dict(label=label, start=start, outcome=outcome, days=(t_end - start) / 86400, min_eq=min_eq,
-                final=br.account_equity(), cycles=cycles)
+                final=br.account_equity(), cycles=cycles, locks=G.locks if G else 0)
 
 
 def main():
@@ -117,6 +166,7 @@ def main():
     ap.add_argument("--step", type=int, default=7)
     ap.add_argument("--from", dest="d0", default="2021-03-01"); ap.add_argument("--to", dest="d1", default="2026-08-15")
     ap.add_argument("--set", default=""); ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--guard", default="", help="cap,k,u: candado externo (ver Guard), p.ej. 6,0.5,0.5")
     ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
@@ -129,7 +179,8 @@ def main():
         f, res = a.only.rsplit(":", 1)
         keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
         starts = [s for s in starts if s in keep]
-    jobs = [(s, a.balance, params, a.label) for s in starts]
+    guard = tuple(float(x) for x in a.guard.split(",")) if a.guard else None
+    jobs = [(s, a.balance, params, a.label, guard) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for r in ex.map(one_run, jobs):
