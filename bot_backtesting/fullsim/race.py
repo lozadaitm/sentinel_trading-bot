@@ -42,12 +42,15 @@ class Guard:
     `k` ATR diarios mas en contra desde el precio al llegar al tope, abre la cobertura del
     neto (congela la perdida). La suelta cuando el precio vuelve `u` ATR a favor del nivel del
     candado (re-expone el ciclo), y la cierra si el motor queda sin posiciones.
+    Con `resize` = 1 el candado se reajusta cada vela al neto del motor (si el motor cierra o
+    abre patas con el candado puesto, el conjunto sigue con neto 0).
     """
 
-    def __init__(self, br, cap, k, u):
-        self.br, self.cap, self.k, self.u = br, cap, k, u
+    def __init__(self, br, cap, k, u, resize=0):
+        self.br, self.cap, self.k, self.u, self.resize = br, cap, k, u, resize
         self.cap_px = None
         self.locks = 0
+        self.ref = None
 
     def step(self, atr_d):
         br = self.br
@@ -56,7 +59,7 @@ class Guard:
         if not eng:
             for p in mine:
                 br.close_position(p, "Guard Release")
-            self.cap_px = None
+            self.cap_px = self.ref = None
             return
         net = sum(p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume for p in eng)
         px = br.bid()
@@ -65,8 +68,16 @@ class Guard:
         if mine:
             lk = mine[0]
             side = -1 if lk.type == mt5.POSITION_TYPE_BUY else 1          # lado del neto cubierto
-            if (px - lk.price_open) * side >= self.u * atr_d:
+            ref = self.ref if self.ref is not None else lk.price_open    # nivel del candado original
+            if (px - ref) * side >= self.u * atr_d:
                 br.close_position(lk, "Guard Release")
+                self.ref = None
+            elif self.resize and (net * side <= 1e-6 or abs(round(abs(net), 2) - lk.volume) > 1e-6):
+                br.close_position(lk, "Guard Resize")
+                if abs(net) > 1e-6:
+                    br.market_order(mt5.ORDER_TYPE_SELL if net > 0 else mt5.ORDER_TYPE_BUY, round(abs(net), 2), "Guard Lock")
+                    br._positions[-1].magic = MAGIC_G
+                    self.ref = ref if net * side > 0 else px
             return
         if self.cap_px is None or abs(net) < 1e-6 or not atr_d == atr_d:
             return
