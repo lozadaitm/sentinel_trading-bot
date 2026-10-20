@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-DATA = os.path.join(HERE, "data")
+DATA = os.environ.get("FULLSIM_DATA") or os.path.join(HERE, "data")
 RESULTS = os.path.join(HERE, "results")
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -121,7 +121,8 @@ class Eng(BacktestEngine):
         super().__init__(view, logger, market)
         self.alerts = _Null()
         self.news = _NoNews()
-        self.surv.own_magic = magic
+        if hasattr(self, "surv"):   # el tope de supervivencia no existe en versiones viejas (main)
+            self.surv.own_magic = magic
 
 
 def net(positions):
