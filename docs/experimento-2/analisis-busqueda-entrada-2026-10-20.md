@@ -77,3 +77,51 @@ Fuente: `investigacion/entradas-oro-evidencia-2026-10-20.md`.
 - **Siguiente paso propuesto:** probarla en una cuenta demo aparte, solo esa entrada y con lote mínimo, para medir los precios reales de ejecución a la 01:00 antes de construir nada encima.
 - **El respaldo de la Op3 en adelante** se diseña después, con la entrada que sobreviva.
 - **Riesgo de búsqueda múltiple:** con unas 600 pruebas cabe esperar algún falso positivo. Esta candidata tiene t 4,0 dentro de muestra y se confirmó fuera de muestra en variantes fijadas de antemano, lo que reduce ese riesgo pero no lo elimina.
+
+## Rondas 4 y 5 (20-oct): swap, ideas nuevas y validación móvil
+
+**Cambios en el método** (a pedido del usuario: «¿los años están bien segmentados?»):
+- **Swap incluido:** −0,774 $/oz por noche en compra, +0,367 $/oz en venta, triple el miércoles.
+- **Validación móvil (`wf.py`):** para cada año de 2023 a 2026, la salida de cada regla se elige solo con los 2 años anteriores y se juzga en ese año.
+- **Mezcla por escenario:** tendencia diaria × volatilidad × sesión. En cada escenario se elige, también con los 2 años anteriores, la mejor regla y salida.
+
+**Ideas nuevas:**
+- banda de ruido de Zarattini;
+- noticias (FOMC, NFP e IPC: seguir o ir en contra; calendario en `bot_backtesting/fullsim/events_us.csv`, armado por un agente con fuentes oficiales);
+- plata, euro/dólar, índice del dólar y bono de EE. UU. como adelantados del oro (Dukascopy, `fetch_cross.py`);
+- picos de volumen (seguir o ir en contra);
+- reversión al VWAP;
+- un modelo de dirección con LightGBM (`ml_direction.py`): acierta el 50–51 % cada año, **no sirve**.
+
+**Validación móvil por regla** (2023–2026, ganancia por operación en $/oz con todos los costes; ventaja = ganancia − azar):
+
+| Regla | Años con ganancia | Años con ventaja | Operaciones | $/oz por operación | Ventaja | Salida que eligió |
+|---|---|---|---|---|---|---|
+| **Compra en la reapertura (01:00→10:00) con tendencia diaria alcista** | 4/4 | 4/4 | 569 | +2,82 | +2,59 | sin salida en contra; objetivo o hora |
+| Compra en la reapertura (01:00→06:00), sin filtro | 4/4 | 4/4 | 979 | +1,62 | +1,61 | sin salida en contra |
+| **Banda de ruido (10:00–22:00, una por día, cierre a las 23:00)** | 3/3 | 3/3 | 596 | +2,29 | +2,93 | sin objetivo ni salida en contra (por hora) |
+| **Compresión de Bollinger H1 + ruptura** | 3/3 | 3/3 | 360 | +3,40 | +5,57 | sin salida en contra |
+| Momentum diario (mantener 3 días) | 3/3 | 2/3 | 531 | +6,17 | +8,00 | depende mucho de 2026 |
+| Resto (rupturas de Londres y Nueva York, reversión, VWAP, noticias, volumen, entre mercados, modelo ML) | — | — | — | ≈0 o negativo, o muy pocas operaciones | — | — |
+
+**Mezcla por escenario** (elegida cada año con los 2 anteriores):
+
+| Año | Resultado |
+|---|---|
+| 2023 | −636 $/oz |
+| 2024 | +1 081 $/oz |
+| 2025 | +3 186 $/oz |
+| 2026 | +1 513 $/oz |
+
+Gana 3 de 4 años, pero lo que elige cambia mucho de un año a otro y muchos escenarios tienen pocas operaciones. **Es menos fiable que quedarse con las reglas que funcionan solas.**
+
+**Lectura:**
+1. Hay **tres módulos** que sobreviven a la validación móvil, con ganancia y ventaja positivas todos los años probados:
+   - la **compra en la reapertura asiática**, la candidata para la «Op Big One»;
+   - la **banda de ruido** intradía (de 10:00 a 22:00);
+   - la **compresión de volatilidad en H1**.
+2. **En los tres, la mejor salida no usa salida en contra:** cierran por objetivo o por **hora**, en el mismo día. Eso encaja con no usar stop: la pérdida de cada operación queda acotada por el tiempo que está abierta, sin recovery ni cobertura.
+3. **Cautelas:**
+   - 2024–2026 fue un mercado alcista fuerte y los tres módulos son, sobre todo, de tendencia o de compra;
+   - la ventaja de la reapertura vive en sus primeros minutos (la ejecución hay que medirla en vivo);
+   - elegir estos tres mirando los resultados de la validación móvil es una segunda selección: hay que confirmarlo en demo.

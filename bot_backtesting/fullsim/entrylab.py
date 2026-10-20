@@ -24,6 +24,23 @@ import pandas as pd
 from bot_backtesting.fullsim.harness import DATA, RESULTS
 
 SPREAD, COMM = 0.20, 0.12
+# Swap por onza y noche (symbol.json: -77,4 / +36,7 $/lote; 1 lote = 100 oz). Rollover a la
+# medianoche del servidor, sin fines de semana, triple la noche que termina en miercoles.
+SWAP_LONG, SWAP_SHORT, TRIPLE_DOW = -0.774, 0.367, 2
+
+
+def swap_cost(t0, t1, side):
+    """Swap $/oz acumulado por una posicion abierta de t0 a t1 (epoch servidor)."""
+    d0, d1 = int(t0 // 86400), int(t1 // 86400)
+    if d1 <= d0:
+        return 0.0
+    nights = 0
+    for d in range(d0, d1):                 # el dia d termina en la medianoche d -> d+1
+        dow = (d + 3) % 7                   # 1970-01-01 fue jueves (dow 3)
+        if dow >= 5:
+            continue
+        nights += 3 if dow == TRIPLE_DOW else 1
+    return nights * (SWAP_LONG if side == 1 else SWAP_SHORT)
 IS_END = pd.Timestamp("2024-01-01").timestamp()
 TPS = (0.5, 1.0, 2.0, 3.0, None)        # None = sin objetivo (solo tiempo / salida en contra)
 SLS = (0.5, 1.0, 2.0, None)             # None = sin salida en contra (solo tiempo)
@@ -248,6 +265,108 @@ def rule_fade_extreme_day(B, k=1.5):
     return ev(t_in, -np.sign(body[m]), a1[m] / 4, 20)
 
 
+# ---- tanda 4: ideas del punto 2 (20-oct)
+def rule_noise_band(B, lookback=14, mult=1.0, h0=10, h1=22):
+    """Zarattini: banda = apertura del dia (primera vela) * (1 +- media de |C_tau/O - 1| en los
+    `lookback` dias previos a la MISMA hora tau). Chequeo en HH:00 y HH:30 entre h0 y h1 (servidor):
+    cierre fuera de la banda -> entrar en esa direccion (una vez por dia), salir a las 23:00."""
+    df = B["M15"]; t = pd.to_datetime(df.time.values, unit="s")
+    g = pd.DataFrame({"day": t.normalize(), "hm": t.hour * 60 + t.minute, "o": df.open.values,
+                      "c": df.close.values, "tt": df.time.values + 900})
+    g["o_day"] = g.groupby("day").o.transform("first")
+    g["mv"] = (g.c / g.o_day - 1).abs()
+    piv = g.pivot_table(index="day", columns="hm", values="mv")
+    sigma = piv.rolling(lookback, min_periods=lookback).mean().shift(1)
+    g["sig"] = sigma.stack().reindex(pd.MultiIndex.from_arrays([g.day, g.hm])).values
+    a = atr(df)
+    g["a"] = a
+    chk = g[(g.hm % 30 == 15) & (g.hm >= h0 * 60) & (g.hm <= h1 * 60) & g.sig.notna() & g.a.notna()]
+    up = chk.c > chk.o_day * (1 + mult * chk.sig); dn = chk.c < chk.o_day * (1 - mult * chk.sig)
+    hit = chk[up | dn].copy(); hit["side"] = np.where(up[up | dn], 1, -1)
+    hit = hit[hit.day.dt.dayofweek < 5].groupby("day").head(1)
+    hz = (23 * 60 - (hit.hm + 15)) / 60.0
+    out = ev(hit.tt, hit.side, hit.a, 1.0)
+    out["hz"] = hz.values
+    return out
+
+
+def _events_srv(kinds):
+    """Instantes (epoch servidor) de las publicaciones de events_us.csv de los tipos dados."""
+    E = pd.read_csv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "events_us.csv"))
+    E = E[E.event.isin(kinds)]
+    u = pd.to_datetime(E.date + " " + E.time_utc).dt.tz_localize("UTC")
+    off = np.where([x.dst().total_seconds() > 0 for x in u.dt.tz_convert("America/New_York")], 3, 2)
+    return (u.dt.tz_localize(None) - pd.Timestamp("1970-01-01")) // pd.Timedelta("1s") + off * 3600
+
+
+def rule_event(B, kinds, k, hz, follow=True):
+    """Tras la publicacion: si la vela M15 que empieza en ella mueve |C-O| > k ATR, entrar al
+    cierre de esa vela a favor (follow) o en contra."""
+    df = B["M15"]; a = atr(df); T = df.time.values
+    out_t, out_s, out_a = [], [], []
+    for te in _events_srv(kinds).values:
+        i = np.searchsorted(T, te)
+        if i >= len(T) or T[i] != te or i == 0 or np.isnan(a[i - 1]):
+            continue
+        mv = df.close.values[i] - df.open.values[i]
+        if abs(mv) > k * a[i - 1]:
+            out_t.append(T[i] + 900); out_s.append(int(np.sign(mv)) * (1 if follow else -1)); out_a.append(a[i - 1])
+    return ev(out_t, out_s, out_a, hz)
+
+
+def _cross_m15(name, times):
+    """Cierre y volumen M15 de una serie de data/cross_<name>.pkl alineados a `times` (inicio de vela)."""
+    x = pd.read_pickle(os.path.join(DATA, f"cross_{name}.pkl"))
+    idx = pd.to_datetime(x.time, unit="s")
+    r = x.set_index(idx).resample("15min", label="left", closed="left").agg({"close": "last", "volume": "sum"})
+    r.index = (r.index - pd.Timestamp("1970-01-01")) // pd.Timedelta("1s")
+    r = r.reindex(times)
+    r["close"] = r.close.ffill(limit=2)
+    return r
+
+
+def _zret(c, w, n=500):
+    r = pd.Series(np.log(c)).diff(w)
+    return (r / r.rolling(n, min_periods=200).std()).values
+
+
+def rule_leadlag(B, name, sign, w=2, z_in=2.0, z_gold=0.5, hz=2):
+    """Otro mercado se mueve |z| > z_in en w velas M15 y el oro casi no (|z| < z_gold):
+    entrar en el oro en la direccion esperada (sign = +1 mismo sentido, -1 contrario)."""
+    df = B["M15"]; T = df.time.values
+    x = _cross_m15(name, T)
+    zx = _zret(x.close.values, w); zg = _zret(df.close.values, w)
+    a = atr(df)
+    m = (np.abs(zx) > z_in) & (np.abs(zg) < z_gold) & ~np.isnan(a)
+    m &= ~np.r_[False, m[:-1]]                    # una entrada por episodio
+    return ev(T[m] + 900, sign * np.sign(zx[m]), a[m], hz)
+
+
+def rule_volume_spike(B, k_vol=3.0, k_body=1.0, follow=True, hz=2):
+    """Vela M15 con volumen > k_vol x mediana de 5 dias y cuerpo > k_body ATR: seguir o ir en contra."""
+    df = B["M15"]; T = df.time.values
+    v = _cross_m15("xau", T).volume.values
+    med = pd.Series(v).rolling(96 * 5, min_periods=96).median().shift(1).values
+    a = atr(df); a1 = np.r_[np.nan, a[:-1]]
+    body = (df.close - df.open).values
+    m = (v > k_vol * med) & (np.abs(body) > k_body * a1) & ~np.isnan(a1)
+    return ev(T[m] + 900, np.sign(body[m]) * (1 if follow else -1), a1[m], hz)
+
+
+def rule_vwap_fade(B, k=2.0, hz=2, h0=9, h1=21):
+    """VWAP del dia (desde la primera vela, volumen de ticks): cierre a > k ATR del VWAP -> en contra."""
+    df = B["M15"]; T = df.time.values; t = pd.to_datetime(T, unit="s")
+    v = _cross_m15("xau", T).volume.fillna(0).values
+    tp = ((df.high + df.low + df.close) / 3).values
+    g = pd.DataFrame({"day": t.normalize(), "pv": tp * v, "v": v})
+    vw = (g.groupby("day").pv.cumsum() / g.groupby("day").v.cumsum().replace(0, np.nan)).values
+    a = atr(df); c = df.close.values
+    dev = (c - vw) / a
+    m = (np.abs(dev) > k) & (t.hour >= h0) & (t.hour < h1) & ~np.isnan(dev)
+    m &= ~np.r_[False, m[:-1]]
+    return ev(T[m] + 900, -np.sign(dev[m]), a[m], hz)
+
+
 def families(B):
     F = {}
     for tf, n, hz in (("H4", 20, 72), ("H4", 55, 120), ("D1", 20, 240), ("D1", 55, 480), ("H1", 48, 24)):
@@ -276,6 +395,21 @@ def families(B):
     F["asia_long_if_up"] = lambda: rule_drift_regime(B, 1, 10, 1, 2)
     F["asia_long_if_up_0115"] = lambda: rule_drift_regime(B, 1, 10, 1, 2, 15)
     F["asia_long_if_up_0200"] = lambda: rule_drift_regime(B, 2, 10, 1, 2)
+    # tanda 4
+    F["noise_band"] = lambda: rule_noise_band(B)
+    F["noise_band_15"] = lambda: rule_noise_band(B, mult=1.5)
+    for kinds, nm in ((["FOMC"], "fomc"), (["NFP", "CPI"], "nfpcpi")):
+        F[f"event_{nm}_follow"] = lambda kinds=kinds: rule_event(B, kinds, 1.0, 4)
+        F[f"event_{nm}_fade"] = lambda kinds=kinds: rule_event(B, kinds, 1.0, 4, follow=False)
+    for name, sign in (("xag", 1), ("eurusd", 1), ("dxy", -1), ("ustbond", 1)):
+        if os.path.exists(os.path.join(DATA, f"cross_{name}.pkl")):
+            F[f"leadlag_{name}"] = lambda name=name, sign=sign: rule_leadlag(B, name, sign)
+    if os.path.exists(os.path.join(DATA, "cross_xau.pkl")):
+        F["volume_spike_follow"] = lambda: rule_volume_spike(B)
+        F["volume_spike_fade"] = lambda: rule_volume_spike(B, follow=False)
+        F["vwap_fade"] = lambda: rule_vwap_fade(B)
+    if os.path.exists(os.path.join(DATA, "ml_dir_events.pkl")):
+        F["ml_dir"] = lambda: pd.read_pickle(os.path.join(DATA, "ml_dir_events.pkl"))
     F["ny_short_if_notup"] = lambda: rule_drift_regime(B, 16, 23, -1, "<=0")
     F["ny_short_if_down"] = lambda: rule_drift_regime(B, 16, 23, -1, -2)
     for hd in (1, 3, 5):
@@ -314,17 +448,18 @@ class Evaluator:
             fav, adv, last = np.maximum.accumulate(px - (L + SPREAD)), np.maximum.accumulate((H + SPREAD) - px), \
                 px - (C[-1] + SPREAD)
         res = {}
+        t_in = self.T[k]
         for tp in TPS:
             i_tp = np.searchsorted(fav, tp * scale) if tp else n
             for sl in SLS:
                 i_sl = np.searchsorted(adv, sl * scale) if sl else n
                 if i_sl < n and i_sl <= i_tp:
-                    r = -sl * scale
+                    r, i_out = -sl * scale, i_sl
                 elif i_tp < n:
-                    r = tp * scale
+                    r, i_out = tp * scale, i_tp
                 else:
-                    r = last
-                res[(tp, sl)] = r - COMM
+                    r, i_out = last, n - 1
+                res[(tp, sl)] = r - COMM + swap_cost(t_in, self.T[k + i_out] + 300, side)
         return res
 
     def evaluate(self, E, rng, reps=3):
