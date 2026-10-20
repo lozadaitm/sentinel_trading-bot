@@ -8,10 +8,13 @@ este junto a este archivo) con BALANCE hasta que:
 Ademas se registra cada CICLO (de 0 posiciones a 0 posiciones): patas, lotes brutos y netos
 maximos, movimiento adverso del precio desde la primera entrada (en $ y en ATR diario), peor
 equity dentro del ciclo y duracion. Sirve para ver que ciclos queman la cuenta.
+Cada ciclo reparte su cambio de equity en: con exposicion neta (d_open), con neto 0 o
+candado (d_lock) y swap (d_swap, incluido en los anteriores); y guarda el equity al llegar
+al maximo de patas (eq_cap) para separar lo perdido antes y despues de agotar el rescate.
 
 Uso (desde la raiz del repo, o de un worktree con este archivo copiado):
   python -m bot_backtesting.fullsim.race <etiqueta> [--balance 1000] [--step 7] [--from 2021-03-01]
-         [--to 2026-08-15] [--set clave=valor,...] [--workers 3]
+         [--to 2026-08-15] [--set clave=valor,...] [--workers 3] [--only race_x.pkl:quema]
 Datos: data/bars_all.pkl (entrylab build). FULLSIM_DATA permite apuntar a otra carpeta.
 """
 import argparse
@@ -57,22 +60,33 @@ def one_run(args):
     i1 = market.start_index_for(start + MAX_DAYS * 86400)
     cycles, cur = [], None
     outcome, t_end, min_eq = "sin final", None, balance
+    prev_eq, prev_net = balance, 0.0
     for i in range(i0, min(i1, len(market))):
         market.step_to(i)
-        br.apply_swap(); br.process_bar_sl(); br.mark_to_market()
+        sw0 = sum(p.swap for p in br._positions)
+        br.apply_swap()
+        d_swap = sum(p.swap for p in br._positions) - sw0
+        br.process_bar_sl(); br.mark_to_market()
         E.on_tick()
         br.mark_to_market()
         pos = br._positions
         eq = br.account_equity()
+        if cur is not None:
+            cur["d_open" if abs(prev_net) > 1e-6 else "d_lock"] += eq - prev_eq
+            cur["d_swap"] += d_swap
+        net_now = sum(p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume for p in pos)
         min_eq = min(min_eq, eq)
         now = market.current_time
         if pos and cur is None:
             first = min(pos, key=lambda p: p.time)
             cur = dict(start=now, side=1 if first.type == mt5.POSITION_TYPE_BUY else -1, px0=first.price_open,
                        eq0=eq, legs=0, gross=0.0, net=0.0, adverse=0.0, min_eq=eq,
-                       atr_d=float(atr_d.get(now // 86400 - 1, np.nan)))
+                       atr_d=float(atr_d.get(now // 86400 - 1, np.nan)),
+                       d_open=eq - prev_eq, d_lock=0.0, d_swap=0.0, eq_cap=None, t_cap=None)
         if cur is not None:
             px = br.bid()
+            if len(pos) > cur["legs"]:
+                cur["eq_cap"], cur["t_cap"] = eq, now
             cur["legs"] = max(cur["legs"], len(pos))
             cur["gross"] = max(cur["gross"], sum(p.volume for p in pos))
             cur["net"] = max(cur["net"], abs(sum(p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume for p in pos)))
@@ -81,6 +95,7 @@ def one_run(args):
             if not pos:
                 cur.update(end=now, eq1=eq, result=eq - cur["eq0"])
                 cycles.append(cur); cur = None
+        prev_eq, prev_net = eq, net_now
         ml = br.margin_level()
         if eq >= TARGET * balance:
             outcome, t_end = "duplica", now
@@ -102,6 +117,7 @@ def main():
     ap.add_argument("--step", type=int, default=7)
     ap.add_argument("--from", dest="d0", default="2021-03-01"); ap.add_argument("--to", dest="d1", default="2026-08-15")
     ap.add_argument("--set", default=""); ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
     for kv in filter(None, a.set.split(",")):
@@ -109,6 +125,10 @@ def main():
         params[k] = v.lower() == "true" if v.lower() in ("true", "false") else (float(v) if v.replace(".", "", 1).lstrip("-").isdigit() else v)
     ep = lambda s: calendar.timegm(dt.datetime.strptime(s, "%Y-%m-%d").timetuple())
     starts = list(range(ep(a.d0), ep(a.d1), a.step * 86400))
+    if a.only:
+        f, res = a.only.rsplit(":", 1)
+        keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
+        starts = [s for s in starts if s in keep]
     jobs = [(s, a.balance, params, a.label) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
