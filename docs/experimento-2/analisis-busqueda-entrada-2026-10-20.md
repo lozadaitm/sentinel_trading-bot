@@ -125,3 +125,46 @@ Gana 3 de 4 años, pero lo que elige cambia mucho de un año a otro y muchos esc
    - 2024–2026 fue un mercado alcista fuerte y los tres módulos son, sobre todo, de tendencia o de compra;
    - la ventaja de la reapertura vive en sus primeros minutos (la ejecución hay que medirla en vivo);
    - elegir estos tres mirando los resultados de la validación móvil es una segunda selección: hay que confirmarlo en demo.
+
+## Los tres módulos juntos en un solo bot (`portfolio.py`, 20-oct)
+
+**Simulación:** 2023-01 → 2026-10, con costes y swap. La salida de cada módulo se elige cada año con los 2 años anteriores, entre tres tipos:
+- solo hora;
+- objetivo de 1–3 ATR;
+- trailing que se activa a 1–2 ATR y sigue a 0,5–1,5 ATR.
+
+**1. Sin protección de precio (solo cierre por hora): inviable.** En enero–marzo de 2026 algunas operaciones fueron 300–400 $/oz en contra antes de la hora de cierre. Con el lote del bot (0,12 lotes por 5 000 $, la Big One al doble), la caída máxima fue del 118 % y la cuenta se quemó. Con la mitad del lote, la caída fue del 94 %.
+
+**2. Con candado (Hedge Lock) a 1–3 ATR en contra:** congela la pérdida hasta la hora de cierre. En dinero equivale a un stop, más ~0,32 $/oz de coste. El lote se calcula para que el candado cueste un % fijo del equity (la Big One, el doble).
+
+**Ganancia por unidad de riesgo (R)** fuera de muestra:
+
+| Módulo | 2023 | 2024 | 2025 | 2026 |
+|---|---|---|---|---|
+| Big One | +0,17 | +0,22 | +0,22 | **−0,07** |
+| Banda de ruido | −0,15 | +0,07 | −0,02 | +0,06 |
+| Compresión H1 | 0,00 | +0,01 | −0,06 | +0,11 |
+
+Con candado, **solo la Big One aporta**. La banda de ruido y la compresión quedan en ≈0: su ganancia sin candado venía de aguantar movimientos enormes.
+
+**Cuentas, solo con la Big One** (ganancia anual compuesta, peor caída y resultado por año):
+
+| Cuenta | Riesgo por operación | Anual | Peor caída | 2023 / 2024 / 2025 / 2026 |
+|---|---|---|---|---|
+| 1 000 | 0,5 % | +24,7 % | 19,7 % | +20 / +39 / +45 / −7 % |
+| 5 000 | 0,5 % | +28,5 % | 21,4 % | +22 / +44 / +52 / −5 % |
+| 10 000 | 0,5 % | +29,1 % | 21,5 % | +22 / +44 / +53 / −5 % |
+| 10 000 | 1 % | +62,1 % | 38,9 % | +49 / +98 / +124 / −11 % |
+
+- En 1 000 el lote mínimo de 0,01 hace que el riesgo real sea mayor que el nominal.
+- **2026 es negativo.** Con la volatilidad muy alta, el candado a 1 ATR saltó en 42 de 63 operaciones.
+
+**Trailing que eligió la validación móvil para la Big One:** se activa tras **2 ATR** a favor y sigue a **0,5–1,5 ATR**, según el año. No hay objetivo fijo, porque el trailing rinde más.
+
+**Cautelas:**
+- la ventaja vive en los primeros minutos tras la reapertura (la ejecución real no está medida);
+- Dukascopy no es el feed del broker;
+- hubo selección de módulos mirando resultados;
+- 2023–2025 fueron años alcistas y **2026 ya muestra deterioro**.
+
+**Siguiente paso:** validarlo en una cuenta demo antes de cualquier otra cosa.
