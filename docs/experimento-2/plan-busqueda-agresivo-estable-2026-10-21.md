@@ -1,7 +1,7 @@
 # Búsqueda "agresivo pero estable" — plan y banco de ideas (2026-10-21)
 
 Herramienta: `bot_backtesting/fullsim/race.py` con el bot de esta rama (motor real, swap,
-comisión, spread). Cuenta de 1 000 $. Métrica: % que duplica antes de 120 días, % que se quema
+comisión, spread). Cuentas de 1 000 $ y de 5 000 $ (con 5 000 $ el aguante deja más lote, el comportamiento cambia). Métrica: % que duplica antes de 120 días, % que se quema
 (≤ 300 $ o stop-out), equity final media y mediana.
 
 ## Punto de partida (143 arranques, 2021-03 → 2026-08)
