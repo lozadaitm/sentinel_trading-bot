@@ -17,7 +17,7 @@ cierre, tiempos, lotes, ganancia) para analizar en que falla cada Op.
 Uso (desde la raiz del repo, o de un worktree con este archivo copiado):
   python -m bot_backtesting.fullsim.race <etiqueta> [--balance 1000] [--step 7] [--from 2021-03-01]
          [--to 2026-08-15] [--set clave=valor,...] [--workers 3] [--only race_x.pkl:quema]
-         [--guard cap,k,u] [--unfreeze horas]
+         [--guard cap,k,u] [--unfreeze horas] [--op1 buy_only|asia_buy|asia_bias]
 Datos: data/bars_all.pkl (entrylab build). FULLSIM_DATA permite apuntar a otra carpeta.
 """
 import argparse
@@ -133,10 +133,32 @@ def _atr_d1(d1):
     return pd.Series(pd.Series(tr).rolling(14).mean().values, index=d1.time.values // 86400)
 
 
+OP1_ASIA = range(1, 10)   # horas de servidor 01-09: deriva alcista estable (2008-2026)
+
+
+def op1_filter(E, mode):
+    """Filtro de lado/hora para las entradas Op1 (solo simulacion, envuelve _open_entry).
+    buy_only: sin ventas; asia_buy: solo compras y solo 01-09 servidor; asia_bias: sin ventas 01-09."""
+    orig = E._open_entry
+
+    def wrapped(order_type, lots, comment, label):
+        h = (E.market.current_time // 3600) % 24
+        buy = order_type == mt5.ORDER_TYPE_BUY
+        if mode == "buy_only" and not buy:
+            return False
+        if mode == "asia_buy" and (not buy or h not in OP1_ASIA):
+            return False
+        if mode == "asia_bias" and not buy and h in OP1_ASIA:
+            return False
+        return orig(order_type, lots, comment, label)
+    E._open_entry = wrapped
+
+
 def one_run(args):
     start, balance, params, label = args[:4]
     guard_cfg = args[4] if len(args) > 4 else None
     unfreeze_h = args[5] if len(args) > 5 else None
+    op1_mode = args[6] if len(args) > 6 else None
     from bot import strategy
     from bot.logger import Logger
     frames, d1 = _frames()
@@ -146,6 +168,8 @@ def one_run(args):
     br = MultiBroker(market, SYMBOL_SPECS, log, balance, *load_symbol())
     E = Eng(View(br, MAGIC_A), log, market, MAGIC_A)
     E.cfg = {**strategy.DEFAULTS, "news_enforce": False, **params}
+    if op1_mode:
+        op1_filter(E, op1_mode)
     G = Guard(br, *guard_cfg) if guard_cfg else None
     U = Unfreeze(br, unfreeze_h) if unfreeze_h is not None else None
     i0 = market.start_index_for(start)
@@ -219,6 +243,7 @@ def main():
     ap.add_argument("--set", default=""); ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--guard", default="", help="cap,k,u: candado externo (ver Guard), p.ej. 6,0.5,0.5")
     ap.add_argument("--unfreeze", type=float, default=None, help="horas congelado antes de cerrar (ver Unfreeze)")
+    ap.add_argument("--op1", default=None, help="filtro de Op1: buy_only | asia_buy | asia_bias (ver op1_filter)")
     ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
@@ -232,7 +257,7 @@ def main():
         keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
         starts = [s for s in starts if s in keep]
     guard = tuple(float(x) for x in a.guard.split(",")) if a.guard else None
-    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze) for s in starts]
+    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze, a.op1) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for r in ex.map(one_run, jobs):
