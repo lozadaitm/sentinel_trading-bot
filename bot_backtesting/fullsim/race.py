@@ -11,6 +11,8 @@ equity dentro del ciclo y duracion. Sirve para ver que ciclos queman la cuenta.
 Cada ciclo reparte su cambio de equity en: con exposicion neta (d_open), con neto 0 o
 candado (d_lock) y swap (d_swap, incluido en los anteriores); y guarda el equity al llegar
 al maximo de patas (eq_cap) para separar lo perdido antes y despues de agotar el rescate.
+Cada corrida guarda tambien sus patas cerradas (trades: comentario de apertura, motivo de
+cierre, tiempos, lotes, ganancia) para analizar en que falla cada Op.
 
 Uso (desde la raiz del repo, o de un worktree con este archivo copiado):
   python -m bot_backtesting.fullsim.race <etiqueta> [--balance 1000] [--step 7] [--from 2021-03-01]
@@ -205,7 +207,8 @@ def one_run(args):
     t_end = t_end or market.current_time
     return dict(label=label, start=start, outcome=outcome, days=(t_end - start) / 86400, min_eq=min_eq,
                 final=br.account_equity(), cycles=cycles, locks=G.locks if G else 0,
-                exits=U.exits if U else 0, exit_loss=U.realized if U else 0.0)
+                exits=U.exits if U else 0, exit_loss=U.realized if U else 0.0,
+                trades=[{**t, "magic": t.get("magic")} for t in br.closed_trades])
 
 
 def main():
