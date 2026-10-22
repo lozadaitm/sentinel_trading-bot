@@ -86,3 +86,44 @@ Final medio / mediana (% sobre el saldo inicial); ninguna variante duplica.
 Siguiente: E2 con `--unfreeze 72` como instrumento de medida (muchos ciclos por arranque):
 tamaño de la ganancia (trailing de cesta), distancia de la cobertura (Op2), separación de la
 Op3 y distancia de la Op4, en cuenta de 5k.
+
+## E2 base y análisis de patrones (2026-10-22)
+
+**E2 base** (5k, `--unfreeze 72`, 74 arranques): final medio 4 321 $ (p10 3 696, p90 4 876); 894
+ciclos únicos, 19,6 % terminan en pérdida (−130 $ medio) y el resto gana +25,4 $ medio.
+Esperanza por ciclo ≈ 0,804 × 25,4 − 0,196 × 130 ≈ **−5 $**. Para empatar: pérdida media ≤ 104 $
+o frecuencia ≤ 16 %.
+
+**¿Se puede anticipar el ciclo que se congela al abrirlo?** 20 rasgos de mercado al abrir el
+ciclo (tendencia D1/H4, eficiencia de tendencia, variance ratio H1, volatilidad relativa,
+compresión de Bollinger, posición en el rango de 20 días, RSI, retornos 1 h/4 h/24 h, hora,
+día), alineados al lado del ciclo, por quintiles con cortes de train (antes de 2022-09) y
+verificados en test. **Ninguno**: P(pérdida) queda en 0,15–0,27 en todos los quintiles y el
+orden no se repite en test (salvo el lunes, algo peor y débil). Filtrar Op1 por régimen no
+arregla el bot: la pérdida nace en la gestión después del movimiento en contra.
+
+**Capacidad de predicción por escala** (doble barrera: ¿el precio toca antes +k o −k ATR
+diario?): k 0,25 (lo que necesita Op1), 0,5 (Op2: ¿vuelve o sigue?), 1,0 (Op4 o salir del
+candado). Con 2021-2023 aparecían patrones (distancia a la EMA50 H4); con **historia nueva
+2008-2020** (Dukascopy, 77 000 horas, nunca usada) desaparecen: todos los quintiles de todos
+los rasgos quedan en 0,46–0,56 y no repiten entre 2008-14 y 2014-20. Con estos indicadores **la
+dirección del oro no se puede predecir** a ninguna de las escalas que usan las Op.
+
+**Lo único estable es el calendario:** la hora de reapertura (01:00 servidor) sube en todas las
+eras (t ≈ 14) y las horas 02-08 tienen deriva alcista pequeña; 16:00 baja (t ≈ −3); 23:00-00:00
+bajan (posible efecto del spread ensanchado en el bid, no operable). La compra 01:00 → 10:00
+gana bruto en 13 de 13 años 2008-2020 (0,14–1,82 $/oz) y neto de 0,32 $/oz en ~10 de 13; el
+filtro de tendencia diaria (Big One) **no añade** en 2008-2020.
+
+**Límite matemático:** sin ventaja, la probabilidad de llegar a 2× antes de caer a 0,3× es
+como mucho (1 − 0,3)/(2 − 0,3) ≈ 41 %, y los costes (spread, comisión, swap) la bajan. Ninguna
+regla de Op2/Op3/Op4 crea ventaja: solo cambia la forma (muchas ganancias chicas y pocas
+pérdidas grandes, o al revés). "Agresivo y estable" exige (a) una fuente de ventaja real y
+(b) no regalar costes.
+
+Fuentes de ventaja o ahorro a explorar en adelante:
+- Sesgo horario: Op1 solo compras en la ventana asiática; sin ventas antes de la reapertura.
+- Swap: la pareja congelada paga ~−41 $/lote/noche (largo −77, corto +37); reducir noches
+  congeladas o congelar con el corto mayor.
+- Comisiones de los cortes del Healer de 0,01 en 0,01.
+- Volatilidad (sí es predecible) para dimensionar, no para elegir dirección.
