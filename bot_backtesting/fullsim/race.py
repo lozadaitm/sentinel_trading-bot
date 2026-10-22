@@ -15,7 +15,7 @@ al maximo de patas (eq_cap) para separar lo perdido antes y despues de agotar el
 Uso (desde la raiz del repo, o de un worktree con este archivo copiado):
   python -m bot_backtesting.fullsim.race <etiqueta> [--balance 1000] [--step 7] [--from 2021-03-01]
          [--to 2026-08-15] [--set clave=valor,...] [--workers 3] [--only race_x.pkl:quema]
-         [--guard cap,k,u]
+         [--guard cap,k,u] [--unfreeze horas]
 Datos: data/bars_all.pkl (entrylab build). FULLSIM_DATA permite apuntar a otra carpeta.
 """
 import argparse
@@ -88,6 +88,37 @@ class Guard:
             self.locks += 1
 
 
+class Unfreeze:
+    """Salida del congelado (externa al motor): si las patas del motor llevan `hours` horas
+    seguidas con neto ~0, >= 2 patas y en rojo, se cierran todas a mercado. Con neto 0 la
+    perdida ya esta congelada: cerrar la realiza tal cual (sin riesgo de precio extra),
+    corta el swap de la pareja y libera al motor para abrir ciclos nuevos."""
+
+    def __init__(self, br, hours):
+        self.br, self.secs = br, hours * 3600
+        self.since = None
+        self.exits = 0
+        self.realized = 0.0
+
+    def step(self):
+        br = self.br
+        eng = [p for p in br._positions if p.magic == MAGIC_A]
+        net = sum(p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume for p in eng)
+        frozen = len(eng) >= 2 and abs(net) < 0.01 - 1e-9 and sum(p.profit + p.swap for p in eng) < 0
+        now = br.market.current_time
+        if not frozen:
+            self.since = None
+            return
+        if self.since is None:
+            self.since = now
+        if now - self.since >= self.secs:
+            self.realized += sum(p.profit + p.swap for p in eng)
+            for p in list(eng):
+                br.close_position(p, "Freeze Exit")
+            self.exits += 1
+            self.since = None
+
+
 def _frames():
     from bot import config
     B = pd.read_pickle(os.path.join(DATA, "bars_all.pkl"))
@@ -103,6 +134,7 @@ def _atr_d1(d1):
 def one_run(args):
     start, balance, params, label = args[:4]
     guard_cfg = args[4] if len(args) > 4 else None
+    unfreeze_h = args[5] if len(args) > 5 else None
     from bot import strategy
     from bot.logger import Logger
     frames, d1 = _frames()
@@ -113,6 +145,7 @@ def one_run(args):
     E = Eng(View(br, MAGIC_A), log, market, MAGIC_A)
     E.cfg = {**strategy.DEFAULTS, "news_enforce": False, **params}
     G = Guard(br, *guard_cfg) if guard_cfg else None
+    U = Unfreeze(br, unfreeze_h) if unfreeze_h is not None else None
     i0 = market.start_index_for(start)
     i1 = market.start_index_for(start + MAX_DAYS * 86400)
     cycles, cur = [], None
@@ -126,6 +159,9 @@ def one_run(args):
         br.process_bar_sl(); br.mark_to_market()
         E.on_tick()
         br.mark_to_market()
+        if U is not None:
+            U.step()
+            br.mark_to_market()
         if G is not None:
             G.step(float(atr_d.get(market.current_time // 86400 - 1, np.nan)))
             br.mark_to_market()
@@ -168,7 +204,8 @@ def one_run(args):
         cycles.append(cur)
     t_end = t_end or market.current_time
     return dict(label=label, start=start, outcome=outcome, days=(t_end - start) / 86400, min_eq=min_eq,
-                final=br.account_equity(), cycles=cycles, locks=G.locks if G else 0)
+                final=br.account_equity(), cycles=cycles, locks=G.locks if G else 0,
+                exits=U.exits if U else 0, exit_loss=U.realized if U else 0.0)
 
 
 def main():
@@ -178,6 +215,7 @@ def main():
     ap.add_argument("--from", dest="d0", default="2021-03-01"); ap.add_argument("--to", dest="d1", default="2026-08-15")
     ap.add_argument("--set", default=""); ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--guard", default="", help="cap,k,u: candado externo (ver Guard), p.ej. 6,0.5,0.5")
+    ap.add_argument("--unfreeze", type=float, default=None, help="horas congelado antes de cerrar (ver Unfreeze)")
     ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
@@ -191,7 +229,7 @@ def main():
         keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
         starts = [s for s in starts if s in keep]
     guard = tuple(float(x) for x in a.guard.split(",")) if a.guard else None
-    jobs = [(s, a.balance, params, a.label, guard) for s in starts]
+    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for r in ex.map(one_run, jobs):
