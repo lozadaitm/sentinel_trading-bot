@@ -58,3 +58,31 @@ Requieren código:
 ## Criterio de elección
 
 Máximo % de duplicar con % de quema ≤ 10 % y final medio > 1 000 $.
+
+## Resultados E1 (2026-10-22) — entrenamiento 2021-03 → 2023-12, 74 arranques, 120 días
+
+Final medio / mediana (% sobre el saldo inicial); ninguna variante duplica.
+
+| Cuenta | Lote base | Aguante 350 | Aguante 150 | Aguante 80 |
+|---|---|---|---|---|
+| 1k | 0,12 | −10,7 % | −10,2 % | (= 150) |
+| 1k | 0,24 | −11,6 % | −16,3 % | −18,4 % |
+| 1k | 0,36 | −11,6 % | −19,9 % | −26,5 % (1 % quema) |
+| 5k | 0,12 | −7,6 % | −8,9 % | −8,9 % |
+| 5k | 0,24 | −8,4 % | −16,3 % | −19,9 % |
+| 5k | 0,36 | −8,4 % | −22,1 % | −28,6 % (4 % quema) |
+
+- Más lote = más pérdida, casi en proporción: escalar una ventaja negativa.
+- El percentil 90 es negativo en todas: en 9 de cada 10 ventanas de 120 días el bot pierde.
+- Por qué: en TODOS los arranques el bot entra en un ciclo de 4 patas (Op1 + Op2 congeladas
+  + recovery + Op4) a los pocos días y no sale en los 120 días. Antes de congelarse gana
+  rápido (traza 5k 2021-03: 16 ciclos verdes, +8 % en 4 días). Congelado, no abre Op1 y la
+  pareja Op1+Op2 paga swap (≈ −41 $/lote/noche): el swap explica casi toda la pérdida medida.
+- Prueba de salida del congelado (`--unfreeze 72`, cerrar la cesta congelada tras 72 h): en el
+  arranque de la traza, 95 ciclos, 18 salidas que realizan −2 973 $ contra +2 055 $ de ciclos
+  verdes. El congelado no es solo swap: cada ciclo que se congela pierde ~6 veces lo que gana
+  uno verde y pasa ~1 de cada 5 veces. Para ganar hay que cambiar esa proporción.
+
+Siguiente: E2 con `--unfreeze 72` como instrumento de medida (muchos ciclos por arranque):
+tamaño de la ganancia (trailing de cesta), distancia de la cobertura (Op2), separación de la
+Op3 y distancia de la Op4, en cuenta de 5k.
