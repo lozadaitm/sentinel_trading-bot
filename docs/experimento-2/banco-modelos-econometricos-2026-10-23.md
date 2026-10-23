@@ -200,3 +200,55 @@ Para el trailing, las distancias de las Op y el M5, conviene usar «HAR horario 
 4. **Riesgo de cola:** sin candado, el lote tiene que ser mínimo (p99,9 ≈ 11 ATR diarios en 10 días). Con candado, el lote sale del % de riesgo.
 5. **Tamaño:** 3 % por operación en la Big One (un cuarto de Kelly).
 6. **M15/M5:** sin ventaja en ningún régimen, horizonte ni geometría. Su papel posible es secundario (lote mínimo) o ninguno.
+
+## Tercera tanda: riesgo dinámico y entradas intradía nuevas (23-oct, noche)
+
+**Corrección de método (afecta a las tablas anteriores de la Big One).** El remuestreo
+mensual tomaba solo los meses con operaciones. Los meses sin Big One (tendencia no alcista)
+quedaban fuera, y eso inflaba las probabilidades. Ahora se usa el calendario completo
+2023-01 → 2026-10, con esos meses planos. Con eso, HAR + eventos al 3 % da:
+- P(2x en 12 meses): 51 % (antes 60 %);
+- mediana a 12 meses: ×2,03, unos **+6 % al mes compuesto**;
+- P(caída ≥ 50 %): 4 %.
+
+Con el calendario corregido, operar **todos los días con peso** (neutros y bajistas ×0,5) sí ayuda: P(2x) 57 % y ×2,20.
+
+### Entradas intradía (`econ_intraday.py`, `cand_intraday.py`)
+
+| Modelo | Resultado |
+|---|---|
+| S1: mapa de 4 320 franjas de 15 min (hora × día × tendencia × lado × horizonte), con control de falsos positivos | Solo **la reapertura de la 01:00** pasa en train y en test. Ninguna otra hora del día tiene deriva que pague el costo |
+| S2: una sesión predice la siguiente (Asia → Londres → NY → cierre) | ❌ Correlaciones de −0,07 a +0,11 que cambian de signo entre tramos |
+| S3: deriva antes y después de noticias | Débil: seguir el salto de FOMC y NFP 24 h, e ir contra el del IPC, gana en los dos tramos. En test la t es < 1,3, porque son pocos eventos (~35 al año) |
+| S4: calendario (día de la semana, inicio y fin de mes) | El primer día del mes sube +0,3 % (t 1,9 / 1,3), pero frente al azar emparejado la ventaja en test es negativa ❌ |
+| S5: después de una hora extrema (> 3, 4 o 5 veces la volatilidad típica) | ❌ Ni seguir ni contrariar pasa con t > 1 en train |
+
+**Satélites de noticias** (FOMC/NFP siguen el salto; IPC en contra; objetivo 3, candado 2 × ATR M15, máximo 24 h; salida fijada de antemano):
+- R medio: FOMC +0,27, NFP +0,09, IPC 0,00.
+- Sumados al 2 % de riesgo junto a la Big One, P(2x) sube de 51 % a 55 % sin más caída.
+- Aporte chico. Con tan pocos eventos, la evidencia es débil.
+
+### Riesgo dinámico (`risk_dyn.py`, `final_combo.py`)
+
+| Esquema (Big One al 3 % de base) | Qué hace | Resultado |
+|---|---|---|
+| Condicional (modelo de R esperado) | Arriesgar más cuando el modelo prevé más R | ❌ Correlación entre previsto y real: −0,02. Sube la caída (P(DD50) 45 %) sin información |
+| Volatilidad baja | Más riesgo los días tranquilos | ❌ Peor que fijo |
+| Colchón | Arriesgar extra solo con la ganancia acumulada | Sube P(×3), pero también la caída medida desde el máximo (15–56 %) |
+| **Racha** | ×1,5–2 tras 20 operaciones con R medio > 0, ×0,75 si no | ✅ moderado: tras una racha positiva el R medio es 0,24, frente a 0,07 tras una negativa; se cumple en 2024–2025 y no en 2023 |
+| **Freno por caída** | Baja el riesgo en proporción a la caída (hasta la mitad) | ✅ deja la P(caída ≥ 50 %) en ≈ 0 |
+
+**Combinación final** (calendario completo, 2 000 caminos de 12 meses; cuenta de 5 000):
+
+| Big One | Satélites | Racha | Freno | ×12 m (mediana) | Crec./mes | P(2x) | P(3x) | P(DD ≥ 50 %) | Real 2023–26 (×, caída) |
+|---|---|---|---|---|---|---|---|---|---|
+| alcista, 3 % fijo | — | — | — | 2,03 | 6,1 % | 51 % | 26 % | 4 % | ×17, 48 % |
+| todos los días | 2 % | — | — | 2,33 | 7,3 % | 60 % | 33 % | 5 % | ×26, 48 % |
+| **todos los días** | **2 %** | **×2 (hasta 6 %)** | **sí** | **2,27** | **7,1 %** | **56 %** | **37 %** | **3 %** | ×56, 49 % |
+| todos los días | 2 % | ×1,5 | no | 2,54 | 8,1 % | 63 % | 42 % | 12 % | ×57, 57 % |
+| todos los días | 2 % | ×2 | no | 2,90 | 9,3 % | 65 % | 49 % | 35 % | ×119, 68 % |
+
+**Lectura:**
+- Un riesgo dinámico **hasta 6 %** (tras rachas buenas) **con freno por caída** sube la probabilidad de triplicar en un año (37 % frente a 26 %) sin aumentar el riesgo de caer a la mitad.
+- Llegar al 10 % solo agrega caída: ningún modelo identifica de antemano los momentos en que el 10 % estaría justificado.
+- El techo realista con la evidencia actual es **+7 a +9 % al mes compuesto**, con caídas de 40–50 % en el camino real.

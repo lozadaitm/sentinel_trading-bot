@@ -20,6 +20,8 @@ import pandas as pd
 from bot_backtesting.fullsim.entrylab import COMM, DATA, RESULTS, SPREAD, _tsmom_state, atr, swap_cost
 
 TEST_YEARS = (2023, 2024, 2025, 2026)
+# calendario completo de la prueba: los meses SIN operaciones (tendencia no alcista) cuentan como planos
+CAL = pd.period_range("2023-01", "2026-10", freq="M")
 LOCKS = (1.0, 2.0, 3.0)
 PYR = (None, 1.0, 1.5)
 _BASE = ([("time", None, None)] + [("tp", tp, None) for tp in (2.0, 3.0)]
@@ -139,7 +141,8 @@ def score(T, f, bal=5000, n=2000, seed=7):
     T = T.sort_values("t").copy()
     T["m"] = pd.to_datetime(T.t, unit="s").dt.to_period("M")
     T["mr"] = T.mae / T.risk_oz
-    months = [g[["r_mult", "mr", "w"]].values for _, g in T.groupby("m")]
+    months = [T.loc[T.m == p, ["r_mult", "mr", "w"]].values for p in CAL]
+    months = [m.reshape(-1, 3) for m in months]
     one = np.array([path(mm, f, bal)[0] / bal - 1 for mm in months])
     rng = np.random.default_rng(seed)
     r12 = [path(np.vstack([months[i] for i in rng.integers(0, len(months), 12)]), f, bal) for _ in range(n)]
