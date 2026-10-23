@@ -9,6 +9,9 @@ metadata:
 > reapertura de la 01:00. Con precios reales del broker, la Big One da +0,08 R por operación (~2 %/mes al 3 %),
 > no +0,20 R (~7 %/mes). Ver `docs/experimento-2/correccion-artefacto-reapertura-2026-10-24.md`. El rumbo y
 > el principio («todo lo que sume sin añadir riesgo») siguen; los números y el tamaño se rehacen con datos del broker.
+> **Propuesta rehecha (24-oct, noche):** Big One + momentum EE.UU. (sigue a Asia) + satélites FOMC/NFP (IPC fuera),
+> candado amplio en ATR diario, tamaño con piso de Grossman-Zhou (50 %, 4-6 %): ~8-9 %/mes, P(2x 12m) ~60 %,
+> caída real 2024-26 43-48 %. Ver `docs/experimento-2/cartera-broker-2026-10-24.md`. Pendiente de aprobación y demo.
 
 **Decisión del usuario (2026-10-24), en simulación.**
 
