@@ -127,3 +127,38 @@ Fuentes de ventaja o ahorro a explorar en adelante:
   congeladas o congelar con el corto mayor.
 - Comisiones de los cortes del Healer de 0,01 en 0,01.
 - Volatilidad (sí es predecible) para dimensionar, no para elegir dirección.
+
+## Banco rápido, filtro de Op1 y mezclas (2026-10-23)
+
+Método rápido: 9 tramos de 120 días sin solapar (2021-03 → 2024-01), cuenta de 5k,
+`--unfreeze 72` (solo medición). Validado contra el método solapado (P(pérdida) 0,195 vs
+0,196; −14,0 % vs −13,6 % por 120 días).
+
+| Variante | Ciclos | P(pérdida) | % / 120 d | Op1 $ | Op2 $ | Op3 $ | Op4 $ |
+|---|---|---|---|---|---|---|---|
+| base | 737 | 0,195 | −14,0 | −3321 | +306 | −1610 | −1148 |
+| Op1 solo compras | — | — | −12,1 | | | | |
+| Op1 compra asiática (01–09) | 346 | 0,165 | −5,0 | −990 | +231 | −1720 | +648 |
+| Op1 sin ventas 01–09 | 678 | 0,215 | −15,9 | −3186 | −663 | −1648 | −1155 |
+| asiática + trail cesta 0,5 | 358 | 0,159 | −4,2 | −734 | +52 | −1593 | +562 |
+| asiática + trail 0,5 + trail Op4 ancho | 358 | 0,156 | **−3,6** | −852 | +124 | −653 | −52 |
+| asiática + trail Op4 ancho | 346 | 0,165 | −4,7 | −835 | +57 | −891 | +47 |
+| asiática sin corte de pareja del Healer | 304 | 0,174 | −4,2 | −2411 | +1115 | −1029 | +1129 |
+| asiática con lote doble (0,24) | 350 | 0,169 | −5,0 | −1376 | +340 | −1813 | +847 |
+
+Del resto del banco: trail de cesta 0,5 −12,8; sin Op4 (norescue) −21,4 (se congela solo el
+2,3 % de los ciclos pero cada congelado pierde −2 334 $); sin Healer −19,2; k de Op4 1 o 3 peor.
+
+**Costos (3 años, 5k).** Base: bruto +2 931 $, spread −3 377, comisión −2 026, swap −3 300 →
+neto −5 773 con 169 lotes. Mejor mezcla: bruto +2 496, spread −1 536, comisión −922, swap
+−1 470 → neto −1 433 con 77 lotes. Filtrar la Op1 a la ventana asiática corta los costos a la
+mitad y vuelve **positivo el bruto de la Op1** (+1 796 $).
+
+**Dónde falla la Op1 asiática.** Patas cerradas en < 9 h: +5 443 $ de precio, swap 0. Patas que
+quedan en el congelado (> 24 h): −4 781 $ de precio y −1 592 $ de swap (la compra paga −77
+$/lote/noche). Por motivo: Basket Profit Trail +4 500; Freeze Exit −3 386 / −1 115 swap; Healer
+Pair Cut −1 378 / −394. La ventaja horaria es real, pero se la come el ciclo que escala.
+
+Siguiente prueba (cola 13): cerrar la Op1 sola a una hora fija (10, 14 o 23 servidor) si
+todavía no tiene cobertura (`race --op1-exit`, solo simulación), y la mezcla sin corte de
+pareja del Healer.

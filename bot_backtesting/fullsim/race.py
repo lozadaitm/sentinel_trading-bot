@@ -154,11 +154,34 @@ def op1_filter(E, mode):
     E._open_entry = wrapped
 
 
+class Op1Exit:
+    """Salida por hora de la Op1 sola (solo simulacion). Una vez al dia, en la hora H de servidor,
+    si la cesta del motor tiene solo patas Op1 (sin cobertura, recovery ni Op4) se cierra a mercado
+    con el _close_all del motor. Mide si cortar la entrada al acabar la deriva asiatica evita que
+    escale a cobertura/congelado y el swap de compra nocturno."""
+
+    def __init__(self, E, br, hour):
+        self.E, self.br, self.h = E, br, int(hour)
+        self.day = None
+        self.exits = 0
+
+    def step(self):
+        now = self.br.market.current_time
+        if (now // 3600) % 24 != self.h or now // 86400 == self.day:
+            return
+        self.day = now // 86400
+        eng = [p for p in self.br._positions if p.magic == MAGIC_A]
+        if eng and all("Entry" in (p.comment or "") for p in eng):
+            self.E._close_all("Op1 Time Exit")
+            self.exits += 1
+
+
 def one_run(args):
     start, balance, params, label = args[:4]
     guard_cfg = args[4] if len(args) > 4 else None
     unfreeze_h = args[5] if len(args) > 5 else None
     op1_mode = args[6] if len(args) > 6 else None
+    op1_exit_h = args[7] if len(args) > 7 else None
     from bot import strategy
     from bot.logger import Logger
     frames, d1 = _frames()
@@ -172,6 +195,7 @@ def one_run(args):
         op1_filter(E, op1_mode)
     G = Guard(br, *guard_cfg) if guard_cfg else None
     U = Unfreeze(br, unfreeze_h) if unfreeze_h is not None else None
+    X = Op1Exit(E, br, op1_exit_h) if op1_exit_h is not None else None
     i0 = market.start_index_for(start)
     i1 = market.start_index_for(start + MAX_DAYS * 86400)
     cycles, cur = [], None
@@ -185,6 +209,9 @@ def one_run(args):
         br.process_bar_sl(); br.mark_to_market()
         E.on_tick()
         br.mark_to_market()
+        if X is not None:
+            X.step()
+            br.mark_to_market()
         if U is not None:
             U.step()
             br.mark_to_market()
@@ -244,6 +271,8 @@ def main():
     ap.add_argument("--guard", default="", help="cap,k,u: candado externo (ver Guard), p.ej. 6,0.5,0.5")
     ap.add_argument("--unfreeze", type=float, default=None, help="horas congelado antes de cerrar (ver Unfreeze)")
     ap.add_argument("--op1", default=None, help="filtro de Op1: buy_only | asia_buy | asia_bias (ver op1_filter)")
+    ap.add_argument("--op1-exit", dest="op1_exit", type=int, default=None,
+                    help="hora servidor para cerrar la Op1 sola (ver Op1Exit)")
     ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
@@ -257,7 +286,7 @@ def main():
         keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
         starts = [s for s in starts if s in keep]
     guard = tuple(float(x) for x in a.guard.split(",")) if a.guard else None
-    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze, a.op1) for s in starts]
+    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze, a.op1, a.op1_exit) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for r in ex.map(one_run, jobs):
