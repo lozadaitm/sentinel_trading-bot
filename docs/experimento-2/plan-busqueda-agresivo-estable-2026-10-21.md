@@ -231,3 +231,64 @@ test y validación móvil es **de calendario**: la compra en la reapertura asiá
 El camino agresivo-estable con evidencia es un módulo Big One con candado a k·ATR y 2–3 % de
 riesgo por operación, validado antes en demo (ejecución real a las 01:00), con el M15 y el M5
 apagados o en lote mínimo mientras no muestren ventaja.
+
+## Big One al revés, meta mensual y estudio econométrico (2026-10-23, noche)
+
+**¿Se puede invertir la Big One en mercado bajista?** No. Retorno bruto desde la apertura de
+la 01:00 (servidor), en $/oz, según la tendencia diaria del día anterior
+(s = signo(C−C21) + signo(C−C63)):
+
+| Tendencia | Días | 01:00→01:15 | 01:00→03:00 | 01:00→10:00 |
+|---|---|---|---|---|
+| bajista (−2) | 290 | +0,21 | +0,48 | +0,93 |
+| neutra (0) | 419 | +0,52 | +0,90 | +0,82 |
+| alcista (+2) | 717 | +0,99 | +1,75 | +2,93 |
+
+La reapertura tiene sesgo comprador en los tres estados. Una venta ahí paga el sesgo más el
+costo. En 2026 los días bajistas dan −0,68 $/oz en los primeros 15 min: el filtro alcista se queda.
+
+**Meta de +30 % a 2x mensual con la Big One** (`monthly_bigone`: meses reales 2023–2026
+remuestreados; ~15 operaciones/mes, +0,18 R por operación, 36 % de meses negativos):
+
+| Riesgo/op. | Mes típico | P(mes ≥ +30 %) | P(mes ≥ 2x) | P(caída ≥ 50 % en 12 m) |
+|---|---|---|---|---|
+| 2 % | +4 % | 3 % | 0 % | 1 % |
+| 3 % | +6 % | 10 % | 0 % | 14 % |
+| 5 % | +10 % | 31 % | 3 % | 56 % |
+| 8 % | +16 % | 36 % | 5 % | 95 % |
+| 12 % | +22 % | 38 % | 23 % | 100 % |
+
+Con la ventaja medida, +30 % mensual frecuente exige un riesgo que casi seguro parte la cuenta a la mitad en un año.
+
+**Estudio econométrico** (`econ_build.py`, `econ_model.py`; datos públicos FRED y CFTC en
+`data/econ`, no versionados). Tabla diaria 2021-01 → 2026-10 (1 495 días). MCO con errores
+Newey-West; train 2021–23, test 2024–26.
+
+1. **Qué mueve al oro el mismo día** (por 1 desviación típica):
+   - Dólar (DXY): −0,33 % / −0,54 % (t −9 / −7,5).
+   - Tasa real a 10 años: −0,32 % en 2021–23, −0,09 % en 2024–26 (pierde fuerza: el ciclo de compras de bancos centrales desacopló oro y tasas).
+   - VIX y petróleo: secundarios e inestables.
+   - R²: 0,39 en 2021–23; 0,20–0,27 desde 2024.
+   - Oro-plata: correlación 0,78 el mismo día.
+2. **Qué predice** (solo con lo conocido antes de la 01:00): 35 variables × 5 objetivos (día
+   siguiente, reapertura 15 min, 01–10 h, resto del día, semana siguiente) = 175 pruebas.
+   - 14 tienen |t| > 2 en train; **ninguna** repite con el mismo signo en test.
+   - Un modelo ridge con todo da R² fuera de muestra negativo en los 5 objetivos y un acierto de signo de 42–51 %.
+   - **La dirección del oro no es predecible con macro, posicionamiento COT, cruzados ni técnico diario.**
+3. **Volatilidad sí es predecible:**
+   - HAR (volatilidad realizada de 1, 5 y 22 días): R² fuera de muestra 0,54, frente a 0,28 del promedio de 22 días (≈ ATR).
+   - Agregar VIX y calendario no mejora (0,48).
+   - Los días de FOMC/IPC suben la volatilidad prevista.
+4. **R de la Big One por régimen** (569 operaciones 2023–2026; tercil de volatilidad prevista,
+   VIX, cambio de tasa real y de dólar a 20 d, COT, momentum, distancia a la MA50, dólar del
+   día anterior, eventos, día de la semana):
+   - Ninguna variable ordena el R de forma monótona y estable.
+   - Las diferencias caben dentro de ±1 error estándar (≈ 0,1 R por tercil).
+
+**Lectura.**
+- El modelo econométrico confirma lo de las simulaciones: lo que mueve al oro (dólar, tasas reales) se conoce recién cuando ya pasó.
+- Un arnés en tiempo real que vigile esas variables no puede anticipar la dirección.
+- Sí puede:
+  - prever la volatilidad del día (HAR) y del calendario, para fijar el lote y el candado en volatilidad prevista en vez del ATR pasado;
+  - bloquear o reducir el riesgo en días de evento.
+- Es una mejora de estabilidad, no de dirección.
