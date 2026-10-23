@@ -78,12 +78,20 @@ def build():
                     rows.append((T[k], d, D.at[d, "s"], int(d in evd), sc_name, kind, a, dd, lk, pnl, mae, lk * sc))
     R = pd.DataFrame(rows, columns=["t", "d", "state", "ev", "scale", "kind", "a", "dd", "lock", "pnl", "mae", "risk_oz"])
     R["year"] = pd.to_datetime(R.t, unit="s").dt.year
-    R["exit"] = R.scale + "_" + R.kind + "_" + R.a.astype(str) + "_" + R.dd.astype(str) + "_L" + R.lock.astype(str)
+    R["exit"] = exit_label(R)
     R["r_mult"] = R.pnl / R.risk_oz
     return R
 
 
+def exit_label(R):
+    """Nombre de la salida. Con pandas 3, None/NaN en a/dd daba un nombre NaN y la validacion movil
+    descartaba las salidas por hora y por objetivo: se rellenan con 0."""
+    f = lambda c: R[c].astype(float).fillna(0).map(lambda v: f"{v:g}")
+    return R.scale + "_" + R.kind + "_" + f("a") + "_" + f("dd") + "_L" + f("lock")
+
+
 def walk_forward(R):
+    R = R.assign(exit=exit_label(R))
     out = []
     for Y in (2024, 2025, 2026):
         tr, te = R[R.year.isin([Y - 2, Y - 1])], R[R.year == Y]
