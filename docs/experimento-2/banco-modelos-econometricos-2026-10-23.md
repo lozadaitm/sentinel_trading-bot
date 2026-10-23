@@ -31,7 +31,7 @@ concreta: lote, distancias, horario, régimen o salida.
 | B1 | HAR (volatilidad realizada de 1, 5 y 22 días) | ¿Cuánto se moverá hoy? | Lote, candado, distancia de cobertura | ✅ R² fuera de muestra 0,54 (ATR: 0,28) |
 | B2 | Perfil horario de la volatilidad | ¿A qué hora se mueve más? | Lote/distancia por hora, horario del M5 | ✅ Perfil estable (correlación 0,94 entre tramos) |
 | B3 | Estudio de eventos (NFP, IPC, FOMC) | ¿Cuánto dura el golpe de la noticia? | Ventanas de bloqueo del NewsGuard | ✅ Golpe ×5–8 en el minuto 0; dura 30–60 min (IPC/NFP) y ~3 h (FOMC) |
-| B4 | GARCH / HAR intradía (M15) | ¿Volatilidad de la próxima hora? | Trailing y distancias del M5 | ⏳ |
+| B4 | HAR horario + estacionalidad | ¿Volatilidad de la próxima hora? | Trailing y distancias del M5 y de las Op | ✅ R² fuera de muestra 0,55 (tipo ATR: 0,37) |
 
 ## C. Riesgo de cola (¿cuánto puede ir en contra sin stop?)
 
@@ -45,14 +45,14 @@ concreta: lote, distancias, horario, régimen o salida.
 | # | Modelo | Pregunta | Alimenta | Estado |
 |---|---|---|---|---|
 | D1 | Probabilidad de tocar +a antes que −b frente al azar b/(a+b) | ¿Alguna relación objetivo/cobertura le gana al azar? | TP de la Op1 y distancia de la Op2 | ❌ Igual al azar ±2 puntos en todas las geometrías |
-| D2 | Modelo de duración (riesgo por tiempo) de las operaciones | ¿Cuándo deja de convenir mantener una operación abierta? | TimeStop del M5 (su mayor pérdida) | ⏳ Indicio: a 4–8 h las entradas del M5 dan +0,13/+0,25 $/oz bruto (t 1,6–2,3), aún bajo el costo |
+| D2 | Modelo de duración (riesgo por tiempo) de las operaciones | ¿Cuándo deja de convenir mantener una operación abierta? | TimeStop del M5 (su mayor pérdida) | ❌ Frente al azar emparejado, la ventaja diaria es negativa o nula a 1–12 h. El «indicio» era deriva del oro |
 
 ## E. Régimen (¿qué lógica usar hoy?)
 
 | # | Modelo | Pregunta | Alimenta | Estado |
 |---|---|---|---|---|
 | E1 | Razón de varianzas por horizonte, sesión, tendencia y volatilidad | ¿El oro sigue tendencia o revierte a 15 min / 1 h / 4 h / 1 día? | Lógica del M5 (surfer o scalper) y de la Op1 | ❌ Paseo al azar en 15 min–1 día (VR ≈ 1). Única señal estable: los días de volatilidad baja siguen un poco la tendencia (VR 1,06–1,07, z ≈ 2) |
-| E2 | Markov de dos estados (calma/agitado) | ¿El régimen es persistente y cambia la lógica ganadora? | Interruptor de modo | ⏳ |
+| E2 | Markov de dos estados (calma/agitado) | ¿El régimen es persistente y cambia la lógica ganadora? | Interruptor de modo | ❌ Persistente (calma ~30 d, agitado ~18 d), pero no cambia la lógica ganadora de forma estable |
 
 ## F. Ejecución y costos
 
@@ -66,7 +66,7 @@ concreta: lote, distancias, horario, régimen o salida.
 | # | Modelo | Pregunta | Alimenta | Estado |
 |---|---|---|---|---|
 | G1 | Remuestreo por bloques mensuales (P de duplicar / P de caída) | ¿Qué riesgo por operación es «agresivo pero estable»? | % de riesgo | ✅ (`kelly_bigone`, `bigone_plus`) |
-| G2 | Kelly con incertidumbre del estimador | ¿Cuánto recortar el riesgo porque el R medio es incierto? | % de riesgo | ⏳ |
+| G2 | Kelly con incertidumbre del estimador | ¿Cuánto recortar el riesgo porque el R medio es incierto? | % de riesgo | ✅ Kelly ≈ 10,5 % (p10 6 %); un cuarto de Kelly ≈ 2,6–3 % |
 
 Scripts: `bot_backtesting/fullsim/econ_build.py`, `econ_model.py`, `econ_bank.py`.
 
@@ -147,3 +147,56 @@ Ejemplo: con un ATR diario de 60 $, una posición sin stop mantenida 10 días pu
    - aporte marginal.
 4. **La pirámide (Op2 como segunda entrada a favor) empeora:** más meses de +30 %, pero la probabilidad de caer a la mitad se multiplica (46 % frente a 5 % a 3 %). Se descarta.
 5. **Punto óptimo «agresivo pero estable»: HAR + eventos ×0,5 al 3 %.** Mes mediano +6 %, 13 % de meses ≥ +30 %, 60 % de duplicar en 12 meses y 6 % de caer a la mitad. En la historia real 2023–26 la caída máxima, contando el flotante, fue del 48 %. Esos años fueron alcistas y la ejecución a la 01:00 no está medida.
+
+### Segunda tanda (`econ_bank2.py`)
+
+**B4: volatilidad de la próxima hora.** R² fuera de muestra 2024–26:
+
+| Predictor | R² |
+|---|---|
+| media de 3 h (como un ATR) | 0,37 |
+| media de 3 h ajustada por la hora del día | 0,47 |
+| HAR horario (1 h, 3 h, 24 h, 120 h) | 0,50 |
+| **HAR horario + perfil por hora** | **0,55** |
+| + HAR diario | 0,55 |
+
+Para el trailing, las distancias de las Op y el M5, conviene usar «HAR horario × perfil por hora» en vez del ATR. Predice un 50 % mejor.
+
+**D2b: el TimeStop del M5 contra el azar** (entradas reales del M5 mantenidas k min frente a 3 entradas al azar a la misma hora y del mismo lado):
+- La ventaja media por operación es de +0,01 a +0,42 $/oz.
+- Agrupada por día, la t es negativa o ≈ 0 (de −3,7 a +0,1).
+- La mejora a 4–8 h de D2 era la deriva del oro, no las entradas. **Alargar el TimeStop no arregla el M5.**
+
+**E2: régimen calma/agitado** (HMM de 2 estados sobre la volatilidad diaria, entrenado en 2021–23 y filtrado sin mirar adelante):
+- Calma: 0,71 % diario, dura ~30 días en promedio. Agitado: 1,00 % diario, dura ~18 días.
+- **Big One (HAR):** gana en los dos regímenes.
+
+  | Régimen | 2023 | 2024 | 2025 | 2026 |
+  |---|---|---|---|---|
+  | Agitado | +0,22 | −0,10 | +0,32 | +0,04 |
+  | Calma | +0,18 | +0,32 | +0,17 | — |
+
+  No hace falta filtro.
+- **M5:** el surfer pierde bruto en los dos regímenes. El scalper tiene muy pocas operaciones.
+- **VR(1 h):** en calma hay tendencia solo en 2024–26 (z +2,5); en agitado hay reversión solo en 2021–23 (z −3,0). **No es estable.** Cambiar de modo según el régimen no tiene base.
+
+**G2: Kelly con incertidumbre** (Big One, crecimiento logarítmico, remuestreo por meses):
+
+| Variante | R medio | Kelly | p10 / p25 del remuestreo | Kelly por año (2023 / 2024 / 2025 / 2026) |
+|---|---|---|---|---|
+| base | +0,145 | 11,5 % | 5,5 / 8,5 % | 39,5 / 20,0 / 9,5 / 0,5 % |
+| HAR + eventos | +0,203 | 10,5 % | 6,0 / 7,5 % | 39,5 / 6,5 / 11,5 / 3,0 % |
+
+**3 % de riesgo ≈ un cuarto de Kelly ≈ el Kelly completo del peor año (2026).** Es el techo prudente. Pasar del 5 % ya sería superar a la mitad del Kelly del remuestreo pesimista.
+
+### Hallazgos acumulados para el diseño completo
+
+1. **Dirección:** solo la reapertura asiática (01:00) tiene ventaja. Nada macro, técnico, SMC, de régimen ni de geometría predice la dirección.
+2. **Volatilidad:**
+   - el HAR diario predice el día;
+   - el HAR horario × perfil por hora predice la próxima hora;
+   - los dos sustituyen al ATR para el lote, el candado, el trailing y las distancias.
+3. **Noticias:** riesgo reducido; ventanas de IPC/NFP de −15 a +60 min y de FOMC de −5 a +180 min.
+4. **Riesgo de cola:** sin candado, el lote tiene que ser mínimo (p99,9 ≈ 11 ATR diarios en 10 días). Con candado, el lote sale del % de riesgo.
+5. **Tamaño:** 3 % por operación en la Big One (un cuarto de Kelly).
+6. **M15/M5:** sin ventaja en ningún régimen, horizonte ni geometría. Su papel posible es secundario (lote mínimo) o ninguno.
