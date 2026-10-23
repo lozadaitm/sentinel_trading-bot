@@ -30,3 +30,4 @@
 - [Healer: recorte por parejas](healer-pair-cut.md) — sin recovery recortable, la bolsa paga lotes iguales de patas opuestas (desde 20-oct Op1+Op2 primero, luego recovery+Op4); neto intacto; bolsa ignora cierres propios; deuda persistida si falla; migraciones 015/016
 - [Reporte diario](daily-report.md) — scripts/daily_report.py por correo, L-V 22:15 UTC (tarea SentinelDailyReport); solo lectura; revisar tras el cambio de hora de Israel 25-oct
 - [Simulador de ciclo completo](fullsim-simulator.md) — bot_backtesting/fullsim con el motor real (lab, signals, meta_label); datos fuera de git; medir antes de proponer
+- [Decisión E2: Big One + noticias + racha + freno](decision-bigone-combo.md) — rumbo 24-oct: Big One todos los días (HAR, candado), satélites FOMC/NFP/IPC al 2 %, riesgo 3 % → hasta 6 % por racha con freno por caída; sim ~7 %/mes, P(2x 12m) 56 %, P(DD50) 3 %; falta diseño escrito y demo
