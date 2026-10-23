@@ -7,7 +7,7 @@ import io, os, glob, sys, urllib.request, zipfile
 import numpy as np, pandas as pd
 FS = os.path.dirname(os.path.abspath(__file__))
 HERE = os.path.join(FS, "data", "econ")
-FRED = ("DFII10", "DGS10", "DGS2", "T10YIE", "DTWEXBGS", "VIXCLS", "DFF", "BAMLH0A0HYM2", "DCOILWTICO")
+FRED = ("DFII10", "DGS10", "DGS2", "T10YIE", "DTWEXBGS", "VIXCLS", "DFF", "BAMLH0A0HYM2", "DCOILWTICO", "GVZCLS")
 
 
 def fetch():

@@ -1,5 +1,9 @@
 # Banco de modelos econométricos por aspecto del bot (23-oct)
 
+> **Aviso (24-oct):** las cifras de cuenta de la Big One de este documento están infladas por un artefacto de
+> datos de Dukascopy en la reapertura. Ver `correccion-artefacto-reapertura-2026-10-24.md`. Los modelos de
+> volatilidad, horario, noticias, colas y Kelly siguen valiendo como herramientas.
+
 Idea del usuario: no buscar un solo modelo que prediga el precio, sino un modelo por cada
 aspecto del bot. Cada modelo responde una pregunta concreta y alimenta una decisión
 concreta: lote, distancias, horario, régimen o salida.

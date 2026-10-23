@@ -1,9 +1,14 @@
 ---
 name: decision-bigone-combo
-description: Decisión (24-oct) del rumbo E2: Big One todos los días + satélites de noticias + riesgo por racha hasta 6 % + freno por caída; cualquier mejora que sume sin añadir riesgo se acepta
+description: [EN REVISIÓN: cifras infladas por artefacto de datos, ver correccion-artefacto-reapertura] Decisión (24-oct) del rumbo E2: Big One todos los días + satélites de noticias + riesgo por racha hasta 6 % + freno por caída; cualquier mejora que sume sin añadir riesgo se acepta
 metadata:
   type: project
 ---
+
+> **EN REVISIÓN (24-oct, más tarde).** Las cifras de abajo usaban velas de Dukascopy con el bid hundido en la
+> reapertura de la 01:00. Con precios reales del broker, la Big One da +0,08 R por operación (~2 %/mes al 3 %),
+> no +0,20 R (~7 %/mes). Ver `docs/experimento-2/correccion-artefacto-reapertura-2026-10-24.md`. El rumbo y
+> el principio («todo lo que sume sin añadir riesgo») siguen; los números y el tamaño se rehacen con datos del broker.
 
 **Decisión del usuario (2026-10-24), en simulación.**
 

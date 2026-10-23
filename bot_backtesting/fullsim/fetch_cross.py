@@ -20,6 +20,22 @@ SERIES = {
     "eurusd": I.INSTRUMENT_FX_MAJORS_EUR_USD,
     "dxy": I.INSTRUMENT_IDX_AMERICA_DOLLAR_IDX_USD,
     "ustbond": I.INSTRUMENT_BND_CFD_USTBOND_TR_USD,
+    # indices y otros metales: ¿la deriva de la reapertura / nocturna existe fuera del oro?
+    "sp500": I.INSTRUMENT_IDX_AMERICA_E_SANDP_500,
+    "nas100": I.INSTRUMENT_IDX_AMERICA_E_NQ_100,
+    "dj30": I.INSTRUMENT_IDX_AMERICA_E_D_J_IND,
+    "ger40": I.INSTRUMENT_IDX_EUROPE_E_DAAX,
+    "uk100": I.INSTRUMENT_IDX_EUROPE_E_FUTSEE_100,
+    "jp225": I.INSTRUMENT_IDX_ASIA_E_N225JAP,
+    "xpt": I.INSTRUMENT_CMD_METALS_XPT_CMD_USD,
+    "copper": I.INSTRUMENT_CMD_METALS_COPPER_CMD_USD,
+    # divisas contra el dolar: ¿el dolar se debilita en horario asiatico en todos los cruces?
+    "gbpusd": I.INSTRUMENT_FX_MAJORS_GBP_USD,
+    "audusd": I.INSTRUMENT_FX_MAJORS_AUD_USD,
+    "nzdusd": I.INSTRUMENT_FX_MAJORS_NZD_USD,
+    "usdjpy": I.INSTRUMENT_FX_MAJORS_USD_JPY,
+    "usdchf": I.INSTRUMENT_FX_MAJORS_USD_CHF,
+    "usdcad": I.INSTRUMENT_FX_MAJORS_USD_CAD,
 }
 START, END = dt.datetime(2021, 1, 1), dt.datetime(2026, 10, 17)
 

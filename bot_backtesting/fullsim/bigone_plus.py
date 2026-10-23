@@ -28,6 +28,11 @@ _BASE = ([("time", None, None)] + [("tp", tp, None) for tp in (2.0, 3.0)]
          + [("trail", a, d) for a in (1.0, 2.0) for d in (0.5, 1.0, 1.5)])
 EXITS = [(k, a, d, lk, p) for (k, a, d) in _BASE for lk in LOCKS for p in PYR]
 LOCK_COST = COMM + SPREAD
+# Minuto de entrada tras la reapertura. Dukascopy (2021 -> 2026-01) trae el bid hundido en los primeros
+# 5 min de la 01:00 (-2,4 $/oz frente al broker en 2026; a la 01:05 ya coincide): entrar a la 01:05 es
+# la medida honesta. Con BIGONE_MIN=0 se reproduce la version anterior (inflada).
+ENTRY_MIN = int(os.environ.get("BIGONE_MIN", "5"))
+SUFFIX = "" if ENTRY_MIN == 0 else f"_{ENTRY_MIN:02d}"
 
 
 def events(B, D):
@@ -36,7 +41,7 @@ def events(B, D):
     a = pd.Series(atr(m15)).shift(1).values                  # ATR de la vela ANTERIOR (sin mirar adelante)
     tt = pd.to_datetime(m15.time.values, unit="s")
     m = (tt.hour == 1) & (tt.minute == 0) & (tt.dayofweek < 5) & ~np.isnan(a)
-    E = pd.DataFrame({"t": m15.time.values[m], "atr": a[m], "px": m15.open.values[m]})
+    E = pd.DataFrame({"t": m15.time.values[m] + ENTRY_MIN * 60, "atr": a[m], "px": m15.open.values[m]})
     E["d"] = E.t // 86400
     E["state"] = _tsmom_state(B).reindex(E.d.values).values
     X = D.reindex(E.d.values)
@@ -170,7 +175,7 @@ def main():
     B = pd.read_pickle(os.path.join(DATA, "bars_all.pkl"))
     D = pd.read_pickle(os.path.join(DATA, "econ", "econ_daily2.pkl"))
     E = events(B, D)
-    fp = os.path.join(RESULTS, "bigone_plus_all.pkl")
+    fp = os.path.join(RESULTS, f"bigone_plus_all{SUFFIX}.pkl")
     if os.path.exists(fp):
         R = pd.read_pickle(fp)
     else:
@@ -187,7 +192,7 @@ def main():
         print(f"  {name}: salidas elegidas", T.groupby(["state", "year"]).chosen.first().to_dict())
         for f in (0.02, 0.03, 0.05):
             rows.append(dict(variante=name, riesgo=f"{f * 100:.0f}%", **score(T, f)))
-    pd.concat(picks).to_pickle(os.path.join(RESULTS, "bigone_plus_trades.pkl"))
+    pd.concat(picks).to_pickle(os.path.join(RESULTS, f"bigone_plus_trades{SUFFIX}.pkl"))
     pd.set_option("display.width", 250)
     print(pd.DataFrame(rows).round(3).to_string(index=False))
 
