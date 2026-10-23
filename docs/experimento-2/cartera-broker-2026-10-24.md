@@ -1,5 +1,9 @@
 # Cartera sobre precios reales del broker (24-oct, noche)
 
+> **Superado por `cuentas-scalping-2026-10-24.md`:** la validación móvil de este documento no podía elegir las salidas
+> por hora y por objetivo (fallo de pandas 3). Con todas disponibles, el momentum y la FOMC se volvieron inestables.
+> Ahora se usa una salida fija de antemano, y la FOMC y el IPC quedan descartados.
+
 Rehecha sin el artefacto de Dukascopy (`correccion-artefacto-reapertura-2026-10-24.md`).
 
 **Datos:** M15 de XAUUSD+ del broker, 2022-08 → 2026-10. En 2026 se verificó contra ticks (diferencia de +0,04 $/oz).

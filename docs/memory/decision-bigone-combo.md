@@ -12,6 +12,9 @@ metadata:
 > **Propuesta rehecha (24-oct, noche):** Big One + momentum EE.UU. (sigue a Asia) + satélites FOMC/NFP (IPC fuera),
 > candado amplio en ATR diario, tamaño con piso de Grossman-Zhou (50 %, 4-6 %): ~8-9 %/mes, P(2x 12m) ~60 %,
 > caída real 2024-26 43-48 %. Ver `docs/experimento-2/cartera-broker-2026-10-24.md`. Pendiente de aprobación y demo.
+> **Actualización:** con salida fija de antemano (hora + candado 1 ATR diario), las patas robustas 5/5 años son
+> Big One, momentum EE.UU. y NFP; la FOMC y el IPC quedan fuera. Al 5 %: ~6 %/mes 2022-26, caída 30 %.
+> La cuenta de 1 000 queda forzada a ~8 % de riesgo por el lote mínimo. Ver `cuentas-scalping-2026-10-24.md`.
 
 **Decisión del usuario (2026-10-24), en simulación.**
 
