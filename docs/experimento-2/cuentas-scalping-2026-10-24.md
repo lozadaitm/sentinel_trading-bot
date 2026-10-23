@@ -110,3 +110,48 @@ Ejecución: bloque siguiente a la señal, al ask/bid reales, más comisión.
 - Es un efecto **reciente**. Se vigila en vivo y no entra en la cartera todavía.
 
 **Lectura del scalping:** con un costo de ~0,23–0,29 $/oz, las señales de segundos a pocos minutos no lo cubren, como anticipaba la literatura (`investigacion/scalping-microestructura-2026-10-24.md`). Lo único con forma de ventaja está atado a un evento: la subasta LBMA, reciente, y los saltos no programados, con muestra mínima.
+
+## Ronda 3 (25-oct): comisión real RAW, escalera de salidas y scalping ronda 2
+
+**Comisión real de la cuenta RAW** (Vantage, 1:500):
+- 3 $ por lote **por lado**, medido en 380 operaciones de octubre. Son 0,06 $/oz ida y vuelta.
+- Las simulaciones anteriores usaban 0,12 y eran conservadoras en 0,06 $/oz por operación.
+- Corregido en `bigone_broker.py` (y con él en `broker_rule`), `econ_scalp.py` y `broker_map.py`. Costo total: 0,23 $/oz a la 01:00 y ~0,17 en el resto del día.
+
+**Escalera de salidas:** la misma entrada en 3 tercios (salida por hora, TP 2 y TP 3 ATR M15) con el mismo candado. Datos del broker 2022-10 → 2026-10:
+
+| Pata | R una salida (desvío) | R escalera (desvío) | Razón una → escalera |
+|---|---|---|---|
+| Big One | +0,033 (0,33) | +0,029 (0,24) | 0,100 → 0,122 |
+| Momentum EE. UU. | +0,049 (0,45) | +0,040 (0,32) | 0,108 → 0,124 |
+| NFP | +0,283 (0,80) | +0,191 (0,54) | 0,353 → 0,355 |
+
+**Cuenta de 5 000, 49 meses:**
+
+| Tamaño | Una salida: × / caída / peor mes | Escalera: × / caída / peor mes |
+|---|---|---|
+| 3 % | ×6,6 / 18 % / −8,7 % | ×4,7 / 11 % / −4,4 % |
+| 5 % | ×23 / 30 % / −15 % | ×13 / 19 % / −7,6 % |
+| 8 % | ×122 / 45 % / −24 % | **×59 / 30 % / −12 %** |
+| 10 % | ×332 / 54 % / −30 % | ×147 / 37 % / −15 % |
+
+**Lectura:** al mismo riesgo por operación, la escalera gana menos. A **igual caída** gana bastante más: con 30 % de caída, ×59 frente a ×23. Escalera al 8 % equivale a ~8,7 %/mes compuesto en 49 meses, con 10 meses negativos y peor mes −12 %.
+
+**Últimos 12 meses** (escalera, cuenta nueva el 2025-11-01):
+
+| Cuenta | 5 % fijo | 8 % fijo | Piso G-Z 50 %, 10 % |
+|---|---|---|---|
+| 5 000 | ×1,55 (caída 7 %) | ×1,84 (15 %) | ×1,96 (16 %) |
+| 10 000 | ×1,56 | ×2,02 | ×2,05 |
+| 1 000 | ×2,36 (forzada a ~7 % por el lote mínimo; hasta 20 %) | | |
+
+**Scalping, ronda 2** (`econ_scalp2.py`, con costo real):
+
+| # | Idea | Resultado |
+|---|---|---|
+| SC9 | Ejecución pasiva: órdenes límite a 1,5 / 2 / 3 desv. del promedio de 15 min, objetivo el promedio | ❌ −0,85 a −4,4 $/oz. Selección adversa: se llenan cuando el precio sigue de largo |
+| SC12 | Aperturas Londres 10:00 / COMEX 15:20 / NY 16:30 con ticks (ruptura del rango de 5 min) | ❌ t < 0,8 en todas |
+| SC13 | Modelo lineal con todo a 1 min (retornos, desequilibrio, spread, volatilidad, hora) | ❌ correlación fuera de muestra 0,000 |
+| SC14 | Saltos no programados de 5 min, 2021–2026 (3 314 y 696 casos) | Seguirlos pierde todos los años. Revertir los grandes gana solo en 2025–26 |
+| SC15 | Subasta LBMA de la mañana (venta 12:20 → 12:35), 2021–2026 | −0,04 / −0,27 / −0,34 / −0,06 / **+0,56 / +1,75**: régimen nuevo desde 2025. Tarde: ≈ 0 |
+| SC10–11 | Dólar y plata al minuto; triángulo XAUEUR | Pendiente: los ticks de XAGUSD, USDX, XAUEUR+ y EURUSD+ se están bajando |

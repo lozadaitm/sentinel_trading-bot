@@ -16,7 +16,7 @@ import pandas as pd
 from bot_backtesting.fullsim.econ_intraday import _p, bh
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-COST_OZ = 0.29
+COST_OZ = 0.23    # spread 0,17 + comision real 0,06
 SPLIT = pd.Timestamp("2024-07-01").timestamp() // 86400
 
 

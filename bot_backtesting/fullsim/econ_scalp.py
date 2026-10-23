@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-COMM = 0.12
+COMM = 0.06    # comision real RAW: 3 $/lote por lado
 G = pd.read_pickle(os.path.join(DATA, "ticks_5s.pkl"))
 T = G.index.values.astype(np.int64); BID = G.bid.values.astype(float); ASK = G.ask.values.astype(float)
 MID = (BID + ASK) / 2; N = G.n.values; UP = G.up.values; DN = G.dn.values

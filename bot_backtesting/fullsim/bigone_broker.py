@@ -18,7 +18,7 @@ from bot_backtesting.fullsim.entrylab import swap_cost
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-SPREAD, COMM = 0.17, 0.12
+SPREAD, COMM = 0.17, 0.06    # comision real de la cuenta RAW: 3 $/lote por lado (24-oct)
 LOCK_COST = SPREAD + COMM
 SCALES = {"atr15": (2.0, 3.0, 4.0, 6.0), "atrd": (0.5, 1.0, 1.5)}
 BASE = ([("time", None, None)] + [("tp", tp, None) for tp in (2.0, 3.0, 4.0)]

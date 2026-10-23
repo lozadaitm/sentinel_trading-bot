@@ -23,12 +23,27 @@ FIXED = "atrd_time_0_0_L1"
 MARGIN_LOT = 800.0
 
 
-def trades_fixed():
+LADDER = ("atrd_time_0_0_L1", "atrd_tp_2_0_L1", "atrd_tp_3_0_L1")
+
+
+def pick(R, ladder):
+    """Una salida (FIXED) o ESCALERA: la posicion se reparte en 3 tercios que salen por hora, a TP 2 y a
+    TP 3 ATR M15, con el mismo candado (1 ATR diario). P&L = media de los tres tercios."""
+    if not ladder:
+        return R[R.exit == FIXED]
+    X = R[R.exit.isin(LADDER)]
+    g = X.groupby("t")
+    out = g.first()
+    out["pnl"] = g.pnl.mean(); out["mae"] = g.mae.min(); out["r_mult"] = g.r_mult.mean()
+    return out[g.size() == len(LADDER)].reset_index()
+
+
+def trades_fixed(ladder=False):
     L = lambda n: pd.read_pickle(os.path.join(RESULTS, f"broker_r2_{n}.pkl")).assign(exit=lambda x: exit_label(x))
     # Big One todos los dias (x0,5 si la tendencia no es alcista); momentum EE.UU. con tendencia +2 o -2
-    bo = L("bigone"); bo = bo[bo.exit == FIXED].assign(pata="big_one"); bo["w"] = np.where(bo.state == 2, 1.0, 0.5)
-    ny = L("ny_mom_05_todas"); ny = ny[(ny.exit == FIXED) & ny.state.isin([2, -2])].assign(w=1.0, pata="momentum_eeuu")
-    nf = L("news_nfp"); nf = nf[nf.exit == FIXED].assign(w=1.0, pata="nfp")
+    bo = pick(L("bigone"), ladder).assign(pata="big_one"); bo["w"] = np.where(bo.state == 2, 1.0, 0.5)
+    ny = pick(L("ny_mom_05_todas"), ladder); ny = ny[ny.state.isin([2, -2])].assign(w=1.0, pata="momentum_eeuu")
+    nf = pick(L("news_nfp"), ladder).assign(w=1.0, pata="nfp")
     T = pd.concat([bo, ny, nf], ignore_index=True)
     T["t_out"] = T.t + T.pata.map({"big_one": 9 * 3600, "momentum_eeuu": 6 * 3600, "nfp": 24 * 3600})
     return T.sort_values("t").reset_index(drop=True)
@@ -85,8 +100,22 @@ def run(T, bal0, scheme, start, end):
                    margen_max_pct=max_margin / bal0, peor_flotante=min_eq), por_pata
 
 
+def compare_ladder():
+    print("ESCALERA vs UNA SALIDA (49 meses desde 2022-10, cuenta 5 000):")
+    rows = []
+    for lad in (False, True):
+        T = trades_fixed(lad)
+        for pata, g in T.groupby("pata"):
+            rows.append(dict(escalera=lad, pata=pata, n=len(g), R=g.r_mult.mean(), desvio=g.r_mult.std(), razon=g.r_mult.mean() / g.r_mult.std()))
+        for sch in (("fijo", 0.03), ("fijo", 0.05), ("fijo", 0.08), ("fijo", 0.10)):
+            M, s, pp = run(T, 5000, sch, pd.Timestamp("2022-10-01"), pd.Timestamp("2026-10-17"))
+            rows.append(dict(escalera=lad, pata=f"cuenta {sch}", x=s["x"], caida=s["caida_max"], peor_mes=M["ret_%"].min()))
+    print(pd.DataFrame(rows).round(3).to_string(index=False))
+
+
 def main():
-    T = trades_fixed()
+    compare_ladder()
+    T = trades_fixed(ladder=True)
     pd.set_option("display.width", 250); pd.set_option("display.max_columns", 40)
     start, end = pd.Timestamp("2025-11-01"), pd.Timestamp("2026-10-17")
     schemes = (("fijo", 0.03), ("fijo", 0.05), ("fijo", 0.08), ("gz", 0.5, 0.06), ("gz", 0.5, 0.10))
