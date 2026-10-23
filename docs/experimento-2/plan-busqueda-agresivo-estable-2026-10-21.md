@@ -162,3 +162,72 @@ Pair Cut −1 378 / −394. La ventaja horaria es real, pero se la come el ciclo
 Siguiente prueba (cola 13): cerrar la Op1 sola a una hora fija (10, 14 o 23 servidor) si
 todavía no tiene cobertura (`race --op1-exit`, solo simulación), y la mezcla sin corte de
 pareja del Healer.
+
+## Análisis profundo por Op, smart money, lote y M5 (2026-10-23, tarde)
+
+**Cierre de la Op1 por hora (cola 13, `--op1-exit`).** Con la mejor mezcla (Op1 asiática +
+trail 0,5 + trail Op4 ancho): cerrar la Op1 sola a las 10 h deja −3,8 % por 120 d (vs −3,6 %),
+pero la pérdida media de un ciclo malo baja de −138 a −45 $, los congelados de 55 a 23 y el swap
+de −1 437 a −489 $. Más estable, no más rentable. A las 14 h: −5,1 %; a las 23 h: sin efecto.
+
+**Lote (cola 14, `--volsize 24`: lote × 24/ATR_D de ayer, acotado 0,4–2,5).**
+
+| Variante | % / 120 d | Peor equity (de 5 000) |
+|---|---|---|
+| lote normal + volatilidad | −4,0 | 4 367 |
+| lote ×2 + volatilidad | −3,2 | 4 262 |
+| lote ×2 + volatilidad + cierre Op1 10 h | −4,0 | 4 403 |
+| lote ×3 + volatilidad | −3,2 (idéntico a ×2: manda el tope de supervivencia) | 4 262 |
+
+El M15 aguanta más lote sin quemar, pero sin ventaja el lote solo escala el resultado.
+
+**Smart money como filtro de la Op1** (`op1_smc.py`, 19 702 señales 2021–2025, P(cobertura)
+por quintil, train ≤ 2023 / test 2024–25): barridas de liquidez, FVG, BOS, premium/descuento
+H4 y de 20 días, distancia al máximo/mínimo del día anterior, rango asiático y su barrida,
+posición en el día, números redondos, hora. Ningún rasgo mueve P(cobertura) más de 4 puntos ni
+mantiene el orden en test. **Sin capacidad de filtro.**
+
+**Smart money como entrada con objetivo proyectado** (`smc_setups.py`, primer toque en M5, costo
+0,32 $/oz): barrida + vela de desplazamiento → máximo/mínimo de swing o del día anterior, también
+en killzones; descuento/premium H4 + BOS + FVG. El acierto es igual a la tasa justa que dan las
+distancias (p. ej. 0,58–0,64 vs 0,62–0,68) y la esperanza es negativa en train en todos;
+**la proyección a la liquidez no tiene ventaja**.
+
+**Big One: cuánto riesgo aguanta** (`kelly_bigone.py`, 569 operaciones fuera de muestra
+2023–2026, remuestreo de 12 meses por bloques mensuales; el lote ya escala con el ATR porque el
+candado está a k·ATR):
+
+| Riesgo por operación | P(×2 en 12 m) | P(caída ≥ 50 %) | Mediana ×12 m |
+|---|---|---|---|
+| 1 % | 1–2 % | 0 % | 1,3 |
+| 2 % | 31–37 % | 1–2 % | 1,7 |
+| 3 % | 52–54 % | 10–13 % | 2,1 |
+| 4 % | 61–63 % | 31–34 % | 2,5 |
+
+Cautela: muestra de años alcistas; 2026 da −0,07 R por operación y un filtro por volatilidad no
+lo arregla (el R por tercil de volatilidad no tiene orden estable).
+
+**M5 (`m5race.py`, motor M5 real, 2021-03 → 2024-01, 9 tramos de 120 d, 5 000 $).**
+
+| Corrida | Operaciones | Acierto | Neto $ | Bruto antes de costos | Spread + comisión |
+|---|---|---|---|---|---|
+| ambos regímenes | 9 050 | 59 % | −1 944 | +1 040 | −2 958 |
+| solo scalper (rango) | 132 | 67 % | −30 | +31 | −62 |
+| solo surfer (tendencia) | 8 954 | 59 % | −1 947 | +1 014 | −2 934 |
+
+- El surfer es el 99 % de las operaciones (~13 por día). Trail SL +8 047 $; TimeStop −8 261 $;
+  SL inicial −1 731 $. Su bruto ≈ 0 no paga el costo de 0,32 $/oz.
+- El scalper casi no dispara (~15 por tramo): sus compuertas rara vez coinciden. Ventas de
+  reversión +52 $, compras −70 $.
+- Rasgos de entrada (ADX, RSI, ATR, ancho de banda, distancia a la EMA, rango M15, racha, día,
+  hora y los mismos rasgos SMC): ningún quintil supera el costo en train y test a la vez. Las
+  horas 16–18 y 20 dan bruto +0,10–0,18 $/oz, por debajo del costo.
+- Separar los regímenes en dos bots no ayuda: ninguno tiene ventaja por sí solo.
+
+**Lectura de conjunto.** Op1, Op2, Op3, Op4, el M5 en sus dos regímenes y la proyección por
+smart money no tienen ventaja predictiva sobre la dirección del oro; la gestión solo cambia la
+forma de la distribución y los costos deciden el signo. La única ventaja que sobrevive a train,
+test y validación móvil es **de calendario**: la compra en la reapertura asiática (Big One).
+El camino agresivo-estable con evidencia es un módulo Big One con candado a k·ATR y 2–3 % de
+riesgo por operación, validado antes en demo (ejecución real a las 01:00), con el M15 y el M5
+apagados o en lote mínimo mientras no muestren ventaja.

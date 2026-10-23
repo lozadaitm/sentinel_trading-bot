@@ -154,6 +154,23 @@ def op1_filter(E, mode):
     E._open_entry = wrapped
 
 
+def vol_sizing(E, atr_d, ref, lo=0.4, hi=2.5):
+    """Lote por volatilidad (solo simulacion): multiplica el lote del motor por ref/ATR_D(ayer),
+    acotado a [lo, hi]. ref en $ (24 = mediana 2021-2023): dias tranquilos mas lote, agitados menos."""
+    import math
+    orig = E._calculate_lots
+
+    def wrapped(is_recovery):
+        lots = orig(is_recovery)
+        a = float(atr_d.get(E.market.current_time // 86400 - 1, np.nan))
+        if not a > 0:
+            return lots
+        step = E.b.volume_step()
+        lots = math.floor(lots * min(hi, max(lo, ref / a)) / step + 1e-9) * step
+        return max(E.b.volume_min(), round(lots, 2))
+    E._calculate_lots = wrapped
+
+
 class Op1Exit:
     """Salida por hora de la Op1 sola (solo simulacion). Una vez al dia, en la hora H de servidor,
     si la cesta del motor tiene solo patas Op1 (sin cobertura, recovery ni Op4) se cierra a mercado
@@ -182,6 +199,7 @@ def one_run(args):
     unfreeze_h = args[5] if len(args) > 5 else None
     op1_mode = args[6] if len(args) > 6 else None
     op1_exit_h = args[7] if len(args) > 7 else None
+    vol_ref = args[8] if len(args) > 8 else None
     from bot import strategy
     from bot.logger import Logger
     frames, d1 = _frames()
@@ -193,6 +211,8 @@ def one_run(args):
     E.cfg = {**strategy.DEFAULTS, "news_enforce": False, **params}
     if op1_mode:
         op1_filter(E, op1_mode)
+    if vol_ref:
+        vol_sizing(E, atr_d, vol_ref)
     G = Guard(br, *guard_cfg) if guard_cfg else None
     U = Unfreeze(br, unfreeze_h) if unfreeze_h is not None else None
     X = Op1Exit(E, br, op1_exit_h) if op1_exit_h is not None else None
@@ -273,6 +293,7 @@ def main():
     ap.add_argument("--op1", default=None, help="filtro de Op1: buy_only | asia_buy | asia_bias (ver op1_filter)")
     ap.add_argument("--op1-exit", dest="op1_exit", type=int, default=None,
                     help="hora servidor para cerrar la Op1 sola (ver Op1Exit)")
+    ap.add_argument("--volsize", type=float, default=None, help="ATR_D de referencia en $ (ver vol_sizing)")
     ap.add_argument("--only", default="", help="race_x.pkl:resultado -> solo los arranques con ese resultado")
     a = ap.parse_args()
     params = {}
@@ -286,7 +307,7 @@ def main():
         keep = {r["start"] for r in pickle.load(open(os.path.join(RESULTS, f), "rb")) if r["outcome"] == res}
         starts = [s for s in starts if s in keep]
     guard = tuple(float(x) for x in a.guard.split(",")) if a.guard else None
-    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze, a.op1, a.op1_exit) for s in starts]
+    jobs = [(s, a.balance, params, a.label, guard, a.unfreeze, a.op1, a.op1_exit, a.volsize) for s in starts]
     out = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for r in ex.map(one_run, jobs):
