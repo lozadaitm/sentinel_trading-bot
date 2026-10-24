@@ -252,6 +252,14 @@ class Broker:
                 return False, "El broker no permite EAs/algoritmos en esta cuenta."
         return True, None
 
+    def is_hedging_account(self):
+        """True si la cuenta es hedging (RETAIL_HEDGING), False si no, None si
+        account_info() fallo. El e2 necesita tercios y candado a la vez."""
+        ai = mt5.account_info()
+        if ai is None:
+            return None
+        return ai.margin_mode == mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
+
     def _log_block(self, motivo):
         """Loguea el bloqueo solo cuando CAMBIA, y su levantamiento."""
         if motivo == self._block_reason:

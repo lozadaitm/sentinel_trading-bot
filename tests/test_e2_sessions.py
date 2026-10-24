@@ -97,6 +97,19 @@ def main():
     check(s.add_market_bars(ep("2026-10-22 16:30"), 96) == ep("2026-10-23 17:30"), "bars jueves")
     check(s.add_market_bars(ep("2026-10-23 16:30"), 96) == ep("2026-10-26 17:30"), "bars viernes -> lunes")
 
+    # us_no_entry_day (feriados y cierres anticipados de EE. UU.)
+    def day(txt):
+        return ep(txt) // 86400
+    check(s.us_no_entry_day(day("2026-11-27")), "feriado: viernes tras Thanksgiving 2026-11-27")
+    check(s.us_no_entry_day(day("2026-11-26")), "feriado: Thanksgiving 2026-11-26")
+    check(s.us_no_entry_day(day("2026-07-03")), "feriado: 4 de julio observado 2026-07-03")
+    check(s.us_no_entry_day(day("2026-06-19")), "feriado: Juneteenth 2026-06-19")
+    check(s.us_no_entry_day(day("2026-12-24")), "feriado: 24 de diciembre")
+    check(s.us_no_entry_day(day("2026-12-31")), "feriado: 31 de diciembre")
+    check(s.us_no_entry_day(day("2027-12-31")), "feriado: 31-dic 2027 (y 1-ene 2028 observado)")
+    check(not s.us_no_entry_day(day("2026-10-20")), "dia normal 2026-10-20 no es feriado")
+    check(not s.us_no_entry_day(day("2026-07-02")), "dia normal 2026-07-02 no es feriado")
+
     if FAILS:
         raise SystemExit(f"\ntest_e2_sessions: FALLOS {FAILS}")
     print("\ntest_e2_sessions: TODO OK")

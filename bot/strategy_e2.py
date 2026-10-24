@@ -17,12 +17,21 @@ Reglas puras: bot/sessions.py. Persistencia: bot/e2_state.py.
 Robustez ante caidas: antes de mandar las ordenes se persiste la pata en estado
 'opening' con todo lo calculado; si el proceso muere entre el envio y el
 guardado, al reiniciar se adoptan los tercios vivos por comentario en vez de
-reabrir (nunca se duplica una entrada).
+reabrir (nunca se duplica una entrada). Las posiciones e2 que ninguna pata del
+estado reclama (archivo perdido o corrupto) se adoptan por comentario al arrancar
+y cada hora, y antes de entrar se comprueba que la pata de hoy no este ya en MT5.
+Con el estado ilegible no se abren entradas el resto del dia de servidor.
+
+Salvaguardas operativas: sin cuenta hedging no se entra; sin calendario fresco
+(< 6 h y que cubra hoy) no hay NFP y la Big One va a peso de dia de evento; en
+feriados de EE. UU. (sessions.us_no_entry_day) no entran Momentum ni NFP; si en
+horario de mercado no llega un tick nuevo en 60 s se registra ERROR (reloj local).
 """
 
 import math
 import os
 import shutil
+import time
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -62,15 +71,50 @@ GONE_RECHECK_S = 5        # re-consulta del historial de un ticket ausente
 RECONCILE_EVERY_S = 3600  # aviso de posiciones sin pata: al arrancar y cada hora
 UNCONFIRMED_GIVEUP_S = 900   # tras la salida, espera maxima por tickets ausentes sin confirmar
 UNCONF_ERR_EVERY_S = 600     # ERROR de ticket sin confirmar: cada 10 min
-OPENING_MISS_READS = 5    # lecturas seguidas sin tercios antes de dar por perdida una apertura
+OPENING_MISS_READS = 5    # lecturas no vacias sin tercios antes de dar por perdida una apertura
+CAL_MAX_AGE_S = 6 * 3600     # calendario mas viejo que esto no es fiable (= NewsGuard)
+CAL_ERR_EVERY_S = 600        # ERROR de calendario no fiable: cada 10 min
+NO_TICK_S = 60               # segundos de reloj sin tick nuevo (en horario de mercado) -> ERROR
+NO_TICK_ERR_EVERY_S = 600    # ERROR de "sin ticks": cada 10 min de reloj
+HEDGE_RECHECK_S = 3600       # cuenta no hedging: se vuelve a comprobar cada hora
+NFP_LATE_EXIT_S = 19 * 3600 + 45 * 60   # salida NFP en dia de cierre anticipado despues de 19:45
 
 
 def _is_weekday(day):
     return (day + 3) % 7 < 5
 
 
+def _parse_mults(v):
+    """(m2, m3) desde lista/tupla o texto '2.0,3.0' / '{2,3}' / '[2, 3]'."""
+    if isinstance(v, str):
+        parts = [x for x in v.strip().strip("{}[]()").split(",") if x.strip()]
+    else:
+        parts = list(v)
+    out = tuple(float(x) for x in parts)
+    if len(out) != 2 or not all(math.isfinite(x) and x > 0 for x in out):
+        raise ValueError(v)
+    return out
+
+
+def _parse_comment(c):
+    """('bigone'|'mom'|'nfp', 'third'|'lock', indice 0..2 o None) del comentario de una
+    posicion e2 ('E2 BigOne T1', 'E2 Lock NFP'); None si no es de una pata."""
+    c = c or ""
+    for leg, name in LEG_NAMES.items():
+        if c == f"E2 Lock {name}":
+            return leg, "lock", None
+        pre = f"E2 {name} T"
+        if c.startswith(pre) and c[len(pre):] in ("1", "2", "3"):
+            return leg, "third", int(c[len(pre):]) - 1
+    return None
+
+
 class SessionEngine:
     """Motor e2. Misma forma que M5Engine: on_tick() por tick, close_all(reason)."""
+
+    # main.trading_loop corre on_tick aunque no haya fila de bot_config: DEFAULTS
+    # completos y las salidas deben cerrarse aunque falte la fila.
+    runs_without_cfg = True
 
     def __init__(self, broker, logger, state_path=None):
         self.b = broker
@@ -93,15 +137,46 @@ class SessionEngine:
         self._err_next = {}       # clave -> epoch a partir del cual se puede repetir el ERROR
         self._gone_next = {}      # ticket -> epoch de la proxima consulta de historial
         self._gone_ok = set()     # tickets con cierre confirmado en historial
-        self._opening_miss = {}   # id(pata opening) -> lecturas seguidas sin tercios
         self._next_reconcile = 0
         self._pruned_day = None
+        self._block_pending = False   # estado ilegible al cargar: bloquear el dia en curso
+        self._blocked_day = None      # dia de servidor sin entradas nuevas
+        self._hedging = None          # True/False/None (sin comprobar o lectura fallida)
+        self._hedging_next = 0
+        self._last_tick_key = None    # (time, bid, ask) del ultimo tick distinto
+        self._last_tick_wall = None   # reloj local (time.time) cuando llego
+        self._last_tick_srv = None    # epoch de servidor de ese tick
+        self._started_wall = None
+        self._notick_next = 0.0
 
     # ==============================================================
     # Parametros / seams
     # ==============================================================
     def _p(self, key):
-        return self.cfg.get(key, DEFAULTS[key])
+        """Parametro de bot_config con DEFAULTS: NULL/ausente/invalido -> default,
+        y coercion al tipo del default (la fila de Supabase trae lo que trae)."""
+        d = DEFAULTS[key]
+        v = (self.cfg or {}).get(key)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return d
+        try:
+            if key == "e2_tp_atr15_mults":
+                return _parse_mults(v)
+            if isinstance(d, int):
+                x = float(v)
+                if not math.isfinite(x):
+                    raise ValueError(v)
+                return int(x)
+            if isinstance(d, float):
+                x = float(v)
+                if not math.isfinite(x):
+                    raise ValueError(v)
+                return x
+            return str(v)
+        except (TypeError, ValueError):
+            self._err(f"cfg:{key}", f"E2: bot_config.{key} = {v!r} no es valido; se usa el "
+                                    f"valor por defecto {d!r}.", every=3600)
+            return d
 
     def _legs_enabled(self):
         return {x.strip().lower() for x in str(self._p("e2_legs")).split(",") if x.strip()}
@@ -131,6 +206,92 @@ class SessionEngine:
         return [e for e in self.news._events
                 if e.get("currency") == "USD" and e.get("importance") == "high"]
 
+    def _wall(self):
+        """Reloj local (no el del servidor): avanza aunque no lleguen ticks."""
+        return time.time()
+
+    def _calendar_status(self, day):
+        """(fiable, motivo). Fiable = el export del calendario tiene < 6 h y sus
+        eventos cubren el dia de servidor `day`."""
+        try:
+            self.news._load(self.now)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"error al leer el calendario ({exc})"
+        ga = int(self.news._generated_at or 0)
+        if ga <= 0:
+            return False, "calendario no disponible"
+        age = self.now - ga
+        if age > CAL_MAX_AGE_S:
+            return False, f"calendario generado hace {age / 3600:.1f} h"
+        evs = self.news._events
+        if not evs or not (int(evs[0]["time"]) // DAY <= day <= int(evs[-1]["time"]) // DAY):
+            return False, "el calendario no cubre el dia de hoy"
+        return True, ""
+
+    def _calendar_ok(self, day, quiet=False):
+        ok, why = self._calendar_status(day)
+        if not ok and not quiet:
+            self._err("calendar", f"E2: calendario de noticias NO fiable ({why}): pata NFP "
+                                  f"desactivada y Big One a peso de dia de evento.",
+                      every=CAL_ERR_EVERY_S)
+        return ok
+
+    def _hedging_ok(self):
+        """La escalera y el candado necesitan cuenta hedging. Sin confirmacion
+        (cuenta netting o account_info fallida) no se abren entradas."""
+        if self._hedging is True:
+            return True
+        if self._hedging is False and self.now < self._hedging_next:
+            return False
+        f = getattr(self.b, "is_hedging_account", None)
+        try:
+            v = f() if f else None
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is True:
+            if self._hedging is not None:
+                self.log.write("SYSTEM", "E2: cuenta hedging confirmada; entradas habilitadas.")
+            self._hedging = True
+            return True
+        self._hedging = False if v is False else None
+        if v is False:
+            self._hedging_next = self.now + HEDGE_RECHECK_S
+            self._err("hedging", "E2: la cuenta NO es hedging (margin_mode != RETAIL_HEDGING); el "
+                                 "candado no puede convivir con los tercios. Entradas BLOQUEADAS.",
+                      every=HEDGE_RECHECK_S)
+        else:
+            self._err("hedging", "E2: no se pudo comprobar el modo de margen de la cuenta; "
+                                 "entradas bloqueadas hasta confirmarlo.")
+        return False
+
+    def _watch_ticks(self, tick):
+        """ERROR (con throttle de reloj local) si en horario de mercado pasan mas de
+        NO_TICK_S segundos sin un tick nuevo, o si nunca llega ninguno."""
+        wall = self._wall()
+        if self._started_wall is None:
+            self._started_wall = wall
+        if tick is not None:
+            key = (int(tick.time), float(tick.bid), float(tick.ask))
+            if key != self._last_tick_key:
+                self._last_tick_key = key
+                self._last_tick_wall = wall
+                self._last_tick_srv = int(tick.time)
+                return
+        ref = self._last_tick_wall if self._last_tick_wall is not None else self._started_wall
+        silent = wall - ref
+        if silent < NO_TICK_S:
+            return
+        if self._last_tick_srv is not None \
+                and not sessions._is_market_slot(self._last_tick_srv + int(silent)):
+            return   # fin de semana o pausa diaria: el silencio es normal
+        if wall < self._notick_next:
+            return
+        self._notick_next = wall + NO_TICK_ERR_EVERY_S
+        what = "ningun tick" if self._last_tick_key is None else "ningun tick nuevo"
+        self.log.write("ERROR", f"E2: {what} de {config.SYMBOL} en {silent:.0f} s; la gestion "
+                                f"(candado, objetivos, salida) esta detenida. Revisar MT5.",
+                       balance=self.b.account_balance())
+
     # ==============================================================
     # Estado
     # ==============================================================
@@ -148,8 +309,14 @@ class SessionEngine:
                 where = f"copia en {bak}"
             except OSError as e:
                 where = f"no se pudo copiar a .bak ({e})"
+            # Sin estado fiable no se sabe que patas entraron hoy: se bloquean las
+            # entradas del dia de servidor en curso y las posiciones e2 vivas se
+            # adoptan por comentario en la primera reconciliacion (inmediata).
+            self._block_pending = True
+            self._next_reconcile = 0
             self.log.write("ERROR", f"E2: archivo de estado ilegible ({self.state.load_error}); "
-                                    f"{where}. Se sigue con estado vacio.")
+                                    f"{where}. Se sigue con estado vacio: entradas BLOQUEADAS "
+                                    f"el resto del dia de hoy y posiciones e2 vivas adoptadas.")
 
     def _persist(self):
         """Guarda si hay cambios. False si el guardado fallo (queda pendiente)."""
@@ -228,15 +395,21 @@ class SessionEngine:
         if not self._loaded:
             self._load_state()
         tick = self._fetch_tick()
+        self._watch_ticks(tick)
         if tick is None:
             return
         self.tick = tick
         self.now = int(self._now())
         day = self.now // DAY
+        if self._block_pending:
+            self._block_pending = False
+            self._blocked_day = day
         try:
             self._manage(tick)
-            self._reconcile()
-            if self.is_active and not self.close_only:
+            if self._reconcile():
+                self._manage(tick)   # una pata adoptada con la salida ya pasada cierra ya
+            hedge_ok = self._hedging_ok()
+            if self.is_active and not self.close_only and hedge_ok:
                 self._entries(tick, day)
             if self._pruned_day != day:
                 self._pruned_day = day
@@ -255,23 +428,130 @@ class SessionEngine:
                 out |= {t for t, _ in self._locks(e)}
         return out
 
+    def _claimed(self, p, tracked, active):
+        """La posicion la gestiona alguna pata activa (ticket propio, o comentario de
+        la pata dentro de su vida: tercio sin confirmar del broker, candado tardio)."""
+        return p.ticket in tracked or any(self._leg_comment(e, p.comment or "") and
+                                          self._in_span(e, p) for e in active)
+
     def _reconcile(self):
-        """Aviso (al arrancar y luego cada hora) de posiciones del magic que no
-        gestiona ninguna pata activa: nadie les pondria candado ni salida."""
+        """Al arrancar, tras un estado ilegible y luego cada hora: las posiciones del
+        magic que no gestiona ninguna pata activa. Las de comentario e2 se ADOPTAN
+        (pata minima reconstruida); las demas solo se avisan. Devuelve las adoptadas."""
         if self.now < self._next_reconcile:
-            return
+            return []
         self._next_reconcile = self.now + RECONCILE_EVERY_S
         pos = self.b.positions_checked()
         if pos is None:
             self._next_reconcile = self.now + ERR_EVERY_S
-            return
+            return []
         tracked = self._tracked()
-        stray = [p for p in pos if p.ticket not in tracked]
-        if stray:
-            det = ", ".join(f"#{p.ticket} '{p.comment}' {p.volume:.2f}" for p in stray)
-            self.log.write("WARNING", f"E2: {len(stray)} posicion(es) del magic {self.b.magic} "
+        active = [e for e in self.state.legs.values()
+                  if e.get("status") in ("opening", "open", "locked")]
+        stray = [p for p in pos if not self._claimed(p, tracked, active)]
+        orphans = [p for p in stray if _parse_comment(p.comment)]
+        other = [p for p in stray if not _parse_comment(p.comment)]
+        if other:
+            det = ", ".join(f"#{p.ticket} '{p.comment}' {p.volume:.2f}" for p in other)
+            self.log.write("WARNING", f"E2: {len(other)} posicion(es) del magic {self.b.magic} "
                                       f"sin pata activa que las gestione: {det}.",
                            balance=self.b.account_balance())
+        return self._adopt_orphans(orphans) if orphans else []
+
+    def _adopt_orphans(self, ps):
+        """Reconstruye una pata minima por grupo de posiciones e2 sin pata: pata por
+        comentario, entrada = la posicion mas antigua del grupo, salida por la regla
+        de la pata, lado por el tipo de los tercios, candado si hay posicion 'Lock'."""
+        nfp_bars = int(self._p("e2_nfp_hold_bars"))
+        groups = []
+        # Primero los tercios (por hora): fijan el inicio de cada grupo; luego los candados.
+        for p in sorted(ps, key=lambda p: (_parse_comment(p.comment)[1] != "third", int(p.time))):
+            leg, kind, _ = _parse_comment(p.comment)
+            t = int(p.time)
+            g = next((g for g in groups if g["leg"] == leg and g["t0"] <= t < g["exit"]), None)
+            if g is None:
+                g = {"leg": leg, "t0": t, "exit": sessions.exit_epoch(leg, t, nfp_bars),
+                     "thirds": [], "locks": []}
+                groups.append(g)
+            g["thirds" if kind == "third" else "locks"].append(p)
+        adopted = []
+        for g in groups:
+            name = LEG_NAMES[g["leg"]]
+            tickets = [p.ticket for p in g["thirds"] + g["locks"]]
+            old = self.state.legs.get(f"{g['leg']}:{g['t0'] // DAY}")
+            if old is not None and old.get("status") in ("opening", "open", "locked"):
+                self._err(f"adopt:{g['leg']}:{g['t0']}",
+                          f"E2 {name}: posiciones sin pata {tickets} pero la pata de ese dia ya "
+                          f"esta activa; no se adoptan (revisar a mano).", every=3600)
+                continue
+            e = self._adopted_leg(g)
+            if old is not None:
+                e["replaced"] = {"status": old.get("status"), "reason": old.get("reason")}
+            self.state.put(e)
+            self._dirty = True
+            adopted.append(e)
+            how = ("candado y objetivos recalculados con el ATR" if e.get("lock_price") is not None
+                   else "sin ATR: solo se gestiona la salida (sin candado ni objetivos nuevos)")
+            self.log.write("ERROR", f"E2 {name}: pata adoptada desde MT5 (sin registro en el "
+                                    f"estado): tercios {[p.ticket for p in g['thirds']]}, candado "
+                                    f"{[p.ticket for p in g['locks']]}; lado {e['side']}; entrada "
+                                    f"epoch {e['entry_epoch']}; salida {self._hhmm(e['exit_epoch'])} "
+                                    f"(epoch {e['exit_epoch']}); {how}; estado {e['status']}.",
+                           balance=self.b.account_balance())
+        return adopted
+
+    def _adopted_leg(self, g):
+        thirds = sorted(g["thirds"], key=lambda p: int(p.time))
+        if thirds:
+            buy = thirds[0].type == mt5.POSITION_TYPE_BUY
+        else:
+            buy = g["locks"][0].type == mt5.POSITION_TYPE_SELL
+        slots, lots = [None, None, None], [0.0, 0.0, 0.0]
+        for p in thirds:
+            i = _parse_comment(p.comment)[2]
+            if slots[i] is None:
+                slots[i], lots[i] = p.ticket, float(p.volume)
+        locks = [[p.ticket, float(p.volume)] for p in g["locks"]]
+        e = {"leg": g["leg"], "side": "buy" if buy else "sell", "entry_epoch": g["t0"],
+             "exit_epoch": g["exit"], "entry_price": None, "atr_d": None, "atr15": None,
+             "s": None, "weight": None, "lots": lots, "lots_plan": list(lots),
+             "lock_price": None, "tp": [None, None, None], "thirds": slots,
+             "closed_thirds": [], "locks": locks, "closed_locks": [],
+             "lock_ticket": locks[0][0] if locks else None, "lock_closed": False,
+             "pnl": 0.0, "status": "open", "adopted": True}
+        atr = self._atr_at(g["t0"]) if thirds else None
+        if atr is not None:
+            e["atr_d"], e["atr15"] = atr
+            self._arm(e, float(thirds[0].price_open))
+        else:
+            e["no_atr"] = True
+            if thirds:
+                e["entry_price"] = float(thirds[0].price_open)
+        if locks:
+            e["status"] = "locked"
+            e["locked_at"] = self.now
+        return e
+
+    def _atr_at(self, t0):
+        """(ATR_D, ATR15) como se habrian calculado al entrar en t0, o None si las
+        velas disponibles (120 D1 / 200 M15) no lo permiten."""
+        try:
+            d1 = self._rates_d1(120)
+            m15 = self._rates_m15(200)
+        except Exception:  # noqa: BLE001
+            return None
+        if d1 is None or m15 is None or len(d1) == 0 or len(m15) == 0:
+            return None
+        prev = d1[(d1["time"] // DAY) < t0 // DAY]
+        closed = m15[m15["time"] + sessions.SLOT <= t0]
+        if len(prev) < 14 or len(closed) < 14:
+            return None
+        atr_d = sessions.atr_daily(prev["high"].to_numpy(), prev["low"].to_numpy())
+        a15 = sessions.atr15(closed["high"].to_numpy(), closed["low"].to_numpy(),
+                             closed["close"].to_numpy())
+        if not all(math.isfinite(x) and x > 0 for x in (atr_d, a15)):
+            return None
+        return atr_d, a15
 
     # ==============================================================
     # Gestion de las patas vivas
@@ -287,29 +567,94 @@ class SessionEngine:
             return
         by_ticket = {p.ticket: p for p in pos}
         for e in pending:
-            if e["status"] == "opening":
-                self._adopt_opening(e, pos)
-                if e["status"] != "open":
-                    continue
-            if self.now >= e["exit_epoch"]:
-                self._close_leg(e, pos, by_ticket, "salida por hora")
-                continue
-            live, unknown = self._live_thirds(e, by_ticket)
-            if e["status"] == "open":
-                if not live:
-                    if not unknown and not self._leg_positions(e, pos):
-                        self._finish(e, "sin tercios vivos")
-                    continue
-                if self._locks(e) or self._lock_hit(e, tick):
-                    self._open_lock(e, live, pos, by_ticket)
-                    continue
-                self._check_targets(e, tick, by_ticket)
-            else:
-                if live and not unknown:
-                    self._open_lock(e, live, pos, by_ticket)   # completa si quedo corto
-                elif not live and not unknown and not self._locks_pending(e, by_ticket) \
-                        and not self._leg_positions(e, pos):
+            try:
+                self._manage_leg(e, tick, pos, by_ticket)
+            except Exception as exc:  # noqa: BLE001  (una pata rota no frena a las demas)
+                self._err(f"leg:{e.get('leg')}:{e.get('entry_epoch')}",
+                          f"E2: error gestionando la pata {e.get('leg')} (entrada epoch "
+                          f"{e.get('entry_epoch')}): {type(exc).__name__}: {exc}; se sigue con "
+                          f"las demas y se reintenta.")
+
+    def _manage_leg(self, e, tick, pos, by_ticket):
+        if e["status"] == "opening":
+            self._adopt_opening(e, pos)
+            if e["status"] != "open":
+                return
+        if self.now >= e["exit_epoch"]:
+            self._close_leg(e, pos, by_ticket, "salida por hora")
+            return
+        self._fill_slots(e, pos)
+        live, unknown = self._live_thirds(e, by_ticket)
+        live = live + self._extra_thirds(e, pos)
+        if e["status"] == "open":
+            if not live:
+                if not unknown and not self._leg_positions(e, pos):
+                    self._finish(e, "sin tercios vivos")
+                return
+            if self._locks(e) or self._lock_hit(e, tick):
+                self._open_lock(e, live, pos, by_ticket)
+                return
+            self._check_targets(e, tick, by_ticket)
+        else:
+            if live and not unknown:
+                self._open_lock(e, live, pos, by_ticket)   # completa si quedo corto
+            elif not live and not unknown:
+                if not self._locks_pending(e, by_ticket) and not self._leg_positions(e, pos):
                     self._finish(e, "sin posiciones vivas")
+                else:
+                    self._warn_lock_excess(e, 0.0, by_ticket)
+
+    def _fill_slots(self, e, pos):
+        """Un tercio cuya orden devolvio None/rechazo pero que SI entro (lo muestra
+        MT5 con su comentario dentro de la vida de la pata) se adopta en su hueco."""
+        name = LEG_NAMES[e["leg"]]
+        known = {t for t in e["thirds"] if t} | {t for t, _ in self._locks(e)}
+        for i in range(3):
+            if e["thirds"][i] is not None:
+                continue
+            p = next((p for p in pos if p.comment == f"E2 {name} T{i + 1}"
+                      and p.ticket not in known and self._in_span(e, p)), None)
+            if p is None:
+                continue
+            e["thirds"][i] = p.ticket
+            e["lots"][i] = float(p.volume)
+            known.add(p.ticket)
+            self._dirty = True
+            self.log.write("WARNING", f"E2 {name} T{i + 1}: el broker no confirmo la orden pero "
+                                      f"la posicion #{p.ticket} ({p.volume:.2f} lotes) existe; se "
+                                      f"adopta y se gestiona.", p.price_open, p.volume,
+                           self.b.account_balance(), ticket=p.ticket)
+
+    def _extra_thirds(self, e, pos):
+        """Posiciones con comentario de tercio de la pata, dentro de su vida, que no
+        ocupan ningun hueco (p.ej. un duplicado): cuentan para el candado y la salida."""
+        name = LEG_NAMES[e["leg"]]
+        mine = {t for t in e["thirds"] if t}
+        return [p for p in pos if (p.comment or "").startswith(f"E2 {name} T")
+                and p.ticket not in mine and self._in_span(e, p)]
+
+    def _covered(self, e, by_ticket):
+        v = 0.0
+        for t, vol in self._locks(e):
+            if t in e["closed_locks"]:
+                continue
+            if t in by_ticket:
+                v += by_ticket[t].volume
+            else:
+                v += vol if vol is not None else float("inf")
+        return v
+
+    def _warn_lock_excess(self, e, target, by_ticket):
+        """El candado no se reduce solo (decision de diseno): si cubre mas que los
+        tercios vivos (cierre externo), se avisa una vez por pata."""
+        cov = self._covered(e, by_ticket)
+        if cov > target + 0.005 and math.isfinite(cov) and not e.get("lock_excess_warned"):
+            e["lock_excess_warned"] = True
+            self._dirty = True
+            self.log.write("WARNING", f"Candado {LEG_NAMES[e['leg']]}: cubre {cov:.2f} lotes y "
+                                      f"los tercios vivos suman {target:.2f} (cierre externo); el "
+                                      f"exceso queda como exposicion opuesta hasta la salida.",
+                           balance=self.b.account_balance())
 
     def _live_thirds(self, e, by_ticket):
         """(vivos, dudosos) de los tercios aun no cerrados. Un ticket ausente solo
@@ -369,6 +714,8 @@ class SessionEngine:
 
     @staticmethod
     def _lock_hit(e, tick):
+        if e.get("lock_price") is None:
+            return False   # pata adoptada sin ATR: solo se gestiona la salida
         if e["side"] == "buy":
             return tick.bid <= e["lock_price"]
         return tick.ask >= e["lock_price"]
@@ -388,17 +735,10 @@ class SessionEngine:
                                p.price_open, p.volume, self.b.account_balance(), ticket=p.ticket)
 
         def covered():
-            v = 0.0
-            for t, vol in locks:
-                if t in e["closed_locks"]:
-                    continue
-                if t in by_ticket:
-                    v += by_ticket[t].volume
-                else:
-                    v += vol if vol is not None else float("inf")
-            return v
+            return self._covered(e, by_ticket)
 
         target = round(sum(p.volume for p in live), 2)
+        self._warn_lock_excess(e, target, by_ticket)
         need = round(target - covered(), 2)
         if need >= 0.01 - 1e-9:
             otype = mt5.ORDER_TYPE_SELL if e["side"] == "buy" else mt5.ORDER_TYPE_BUY
@@ -409,16 +749,18 @@ class SessionEngine:
                 self._err(f"lock:{e['leg']}",
                           f"Candado {name} FALLIDO (retcode {rc}) por {need:.2f} lotes. "
                           f"Entrada DESNUDA; se reintenta en cada tick.",
-                          e["lock_price"], need)
+                          e.get("lock_price") or 0.0, need)
                 return
             tkt = getattr(res, "order", 0) or None
             if tkt:
                 locks.append([tkt, round(got, 2)])
             self._dirty = True
+            trig = e.get("lock_price")
             self.log.write("CANDADO", f"Candado {name} abierto: {got:.2f} de {need:.2f} lotes "
-                                      f"opuestos a {e['side']}; precio gatillo {e['lock_price']:.2f}. "
+                                      f"opuestos a {e['side']}; precio gatillo "
+                                      f"{f'{trig:.2f}' if trig is not None else 'n/d'}. "
                                       f"Perdida congelada hasta la salida.",
-                           e["lock_price"], got, self.b.account_balance(), ticket=tkt or 0)
+                           trig or 0.0, got, self.b.account_balance(), ticket=tkt or 0)
         if locks and not e.get("lock_ticket"):
             e["lock_ticket"] = locks[0][0]
         if covered() >= target - 1e-9 and e["status"] != "locked":
@@ -551,9 +893,20 @@ class SessionEngine:
         fills = {p.ticket: p.price_open for p in pos}
         first = next((t for t in e["thirds"] if t is not None and t in fills), None)
         if first is None:
-            k = id(e)
-            self._opening_miss[k] = self._opening_miss.get(k, 0) + 1
-            if self._opening_miss[k] < OPENING_MISS_READS:
+            # Misma regla que la salida: N lecturas NO vacias (una lista vacia puede
+            # ser una reconexion) y >= 15 min desde la primera ausencia; pasada la
+            # hora de salida (+15 min) se abandona igual: si aparecen tercios
+            # despues, la reconciliacion los adopta y los cierra.
+            if "opening_miss_since" not in e:
+                e["opening_miss_since"] = self.now
+                e["opening_miss_reads"] = 0
+            if pos:
+                e["opening_miss_reads"] = e.get("opening_miss_reads", 0) + 1
+            self._dirty = True
+            waited = self.now - int(e["opening_miss_since"])
+            late = self.now >= int(e.get("exit_epoch") or 0) + UNCONFIRMED_GIVEUP_S
+            if not late and (e["opening_miss_reads"] < OPENING_MISS_READS
+                             or waited < UNCONFIRMED_GIVEUP_S):
                 return
             e["status"] = "skipped"
             e["reason"] = "caida durante la apertura, sin tercios vivos"
@@ -579,15 +932,16 @@ class SessionEngine:
     # ==============================================================
     # Entradas
     # ==============================================================
-    def _windows(self, day):
-        """[(leg, inicio_ventana, T_evento)] de hoy para las patas activas."""
+    def _windows(self, day, quiet=False):
+        """[(leg, inicio_ventana, T_evento)] de hoy para las patas activas. Sin un
+        calendario fiable (fresco y que cubra hoy) la pata NFP no se programa."""
         legs = self._legs_enabled()
         out = []
         if "bigone" in legs:
             out.append(("bigone", day * DAY + 3600, None))
         if "mom" in legs:
             out.append(("mom", day * DAY + 15 * 3600, None))
-        if "nfp" in legs:
+        if "nfp" in legs and self._calendar_ok(day, quiet=quiet):
             for ev in self._events():
                 if str(ev.get("name", "")).strip() == NFP_EVENT_NAME:
                     T = (int(ev["time"]) // sessions.SLOT) * sessions.SLOT
@@ -605,10 +959,22 @@ class SessionEngine:
     def _entries(self, tick, day):
         if not _is_weekday(day):
             return
+        if self._blocked_day == day:
+            return   # estado ilegible al arrancar hoy: sin entradas nuevas (ERROR ya registrado)
         grace = int(self._p("e2_entry_grace_s"))
+        nfp_bars = int(self._p("e2_nfp_hold_bars"))
         for leg, start, T in self._windows(day):
             if self.state.entered(leg, day) or self.now < start:
                 continue
+            if leg in ("mom", "nfp") and sessions.us_no_entry_day(day):
+                self._skip(leg, start, "feriado EE. UU. (o cierre anticipado)")
+                continue
+            if leg == "nfp":
+                ex = sessions.exit_epoch("nfp", start, nfp_bars)
+                if sessions.us_no_entry_day(ex // DAY) and ex % DAY > NFP_LATE_EXIT_S:
+                    self._skip(leg, start, f"la salida ({self._hhmm(ex)}) cae en feriado EE. UU. "
+                                           f"despues de las 19:45")
+                    continue
             if self.now >= start + grace:
                 self._skip(leg, start, f"ventana {self._hhmm(start)} pasada sin tick dentro de "
                                        f"los {grace} s")
@@ -626,8 +992,33 @@ class SessionEngine:
         self.log.write("OMITIDA", f"E2 {LEG_NAMES[leg]} omitida hoy: {reason}.",
                        balance=self.b.account_balance())
 
+    def _orphans_today(self, leg, start):
+        """Posiciones vivas con comentario de la pata abiertas en la ventana de hoy
+        [inicio, salida): si existen, la pata ya entro (estado perdido o caida antes
+        del guardado) y NO se abre otra escalera. None si la lectura fallo."""
+        pos = self.b.positions_checked()
+        if pos is None:
+            return None
+        end = sessions.exit_epoch(leg, start, int(self._p("e2_nfp_hold_bars")))
+        return [p for p in pos if (_parse_comment(p.comment) or (None,))[0] == leg
+                and start <= int(p.time) < end]
+
     def _try_enter(self, leg, start, T, tick, day):
         name = LEG_NAMES[leg]
+        dup = self._orphans_today(leg, start)
+        if dup is None:
+            self._err(f"prepos:{leg}", f"E2 {name}: lectura de posiciones fallida antes de "
+                                       f"entrar; no se abre (se reintenta dentro de la ventana).")
+            return
+        if dup:
+            self._err(f"dup:{leg}", f"E2 {name}: ya hay {len(dup)} posicion(es) de la pata de hoy "
+                                    f"sin registro en el estado ({[p.ticket for p in dup]}); NO se "
+                                    f"abre otra escalera: se adoptan.")
+            self._next_reconcile = 0
+            self._reconcile()
+            if not self.state.entered(leg, day):
+                self._skip(leg, start, "posiciones de la pata ya abiertas sin estado")
+            return
         d1 = self._rates_d1(120)
         m15 = self._rates_m15(200)
         if d1 is None or m15 is None or len(d1) == 0 or len(m15) == 0:
@@ -648,13 +1039,17 @@ class SessionEngine:
         weight = 1.0
         if leg == "bigone":
             side = 1
-            event_day = any(int(ev["time"]) // DAY == day
-                            and self._is_bigone_event(str(ev.get("name", "")))
-                            for ev in self._events())
+            if self._calendar_ok(day):
+                event_day = any(int(ev["time"]) // DAY == day
+                                and self._is_bigone_event(str(ev.get("name", "")))
+                                for ev in self._events())
+                info = f"evento={'si' if event_day else 'no'}"
+            else:
+                event_day = True   # sin calendario fiable: peso reducido (conservador)
+                info = "evento=desconocido (calendario no fiable: peso de dia de evento)"
             weight = sessions.bigone_weight(s, event_day,
                                             float(self._p("e2_bigone_weight_nontrend")),
                                             float(self._p("e2_bigone_event_weight")))
-            info = f"evento={'si' if event_day else 'no'}"
         elif leg == "mom":
             p01 = bar_open(day * DAY + 3600)
             if p01 is None:
@@ -707,21 +1102,35 @@ class SessionEngine:
         spread = tick.ask - tick.bid
         fill = None
         for i in range(3):
+            # Tick fresco justo antes de cada orden: deslizamiento y spread por tercio.
+            try:
+                tk = self._fetch_tick() or tick
+            except Exception:  # noqa: BLE001
+                tk = tick
+            ref_i = tk.ask if side == 1 else tk.bid
+            spread_i = tk.ask - tk.bid
+            if i == 0:
+                ref, spread = ref_i, spread_i
             res = self.b.market_order(otype, lots[i], f"E2 {name} T{i + 1}", sl=0.0, tp=0.0)
             got_i = self._filled(res, lots[i])
             if got_i <= 0:
                 e["lots"][i] = 0.0
                 self.log.write("ERROR", f"E2 {name} T{i + 1} RECHAZADA (retcode "
                                         f"{getattr(res, 'retcode', None)}); no se reintenta.",
-                               ref, lots[i], balance)
+                               ref_i, lots[i], balance)
                 continue
+            fill_i = float(getattr(res, "price", 0.0) or 0.0) or ref_i
+            self.log.write("SYSTEM", f"E2 {name} T{i + 1} ejecutada: {got_i:.2f} lotes; ref "
+                                     f"{ref_i:.2f}; fill {fill_i:.2f}; deslizamiento "
+                                     f"{(fill_i - ref_i) * side:+.2f}; spread {spread_i:.2f}.",
+                           fill_i, got_i, balance, ticket=res.order)
             e["thirds"][i] = res.order
             e["lots"][i] = round(got_i, 2)
             if got_i < lots[i] - 1e-9:
                 self.log.write("ERROR", f"E2 {name} T{i + 1} ejecucion PARCIAL: {got_i:.2f} de "
                                         f"{lots[i]:.2f} lotes.", ref, got_i, balance, ticket=res.order)
             if fill is None:
-                fill = float(getattr(res, "price", 0.0) or 0.0) or ref
+                fill, ref, spread = fill_i, ref_i, spread_i
         if fill is None:
             e["status"] = "skipped"
             e["reason"] = "ninguna orden de la escalera entro"
@@ -794,7 +1203,7 @@ class SessionEngine:
         nxt = None
         if _is_weekday(day):
             try:
-                for leg, start, _ in self._windows(day):
+                for leg, start, _ in self._windows(day, quiet=True):
                     if start >= self.now and not self.state.entered(leg, day):
                         if nxt is None or start < nxt[1]:
                             nxt = (leg, start)
@@ -802,6 +1211,7 @@ class SessionEngine:
                 nxt = None
         self.hud = {
             "next_entry": f"{LEG_NAMES[nxt[0]]} {self._hhmm(nxt[1])}" if nxt else "-",
-            "active_legs": [f"{LEG_NAMES[e['leg']]}:{e['status']}" for e in active],
+            "active_legs": [f"{LEG_NAMES.get(e.get('leg'), e.get('leg'))}:{e['status']}"
+                            for e in active],
             "effective_risk": sum(e.get("effective_risk") or 0.0 for e in active),
         }

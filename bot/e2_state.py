@@ -9,6 +9,18 @@ import json
 import os
 
 DAY_S = 86400
+LEGS = ("bigone", "mom", "nfp")
+
+
+def _valid(v) -> bool:
+    """Entrada minima: dict con pata conocida y entry_epoch entero."""
+    if not isinstance(v, dict) or v.get("leg") not in LEGS:
+        return False
+    try:
+        int(v.get("entry_epoch"))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def key(leg: str, day: int) -> str:
@@ -33,7 +45,12 @@ class E2State:
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("el JSON raíz no es un objeto")
-            self.legs = data
+            bad = [k for k, v in data.items() if not _valid(v)]
+            self.legs = {k: v for k, v in data.items() if k not in bad}
+            if bad:
+                # Una entrada malformada no tumba la gestion de las demas; se
+                # descarta y se avisa (el motor trata esto como estado ilegible).
+                self.load_error = f"entradas no validas descartadas: {sorted(bad)}"
         except Exception as e:
             self.legs = {}
             self.load_error = f"{type(e).__name__}: {e}"

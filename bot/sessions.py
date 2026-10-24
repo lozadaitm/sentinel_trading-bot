@@ -5,12 +5,37 @@ Replican exactamente lo que calcula el simulador de investigacion. Los tiempos s
 epochs de servidor, tratados como UTC ingenuo (convencion del repo).
 """
 
+import datetime
+import functools
 import math
 
 import numpy as np
 import pandas as pd
 
 SLOT = 900  # franja de 15 minutos
+
+
+@functools.lru_cache(maxsize=None)
+def _no_entry_dates(year):
+    """Feriados federales de EE. UU. (con fecha observada) del año, mas el viernes
+    tras Thanksgiving, el 24 y el 31 de diciembre. Incluye el 31-dic del año
+    anterior observado por un 1-ene en sabado (rango con margen)."""
+    from pandas.tseries.holiday import USFederalHolidayCalendar
+    hol = USFederalHolidayCalendar().holidays(start=f"{year - 1}-12-01", end=f"{year + 1}-01-31")
+    out = {ts.date() for ts in hol}
+    thursdays = [d for d in pd.date_range(f"{year}-11-01", f"{year}-11-30") if d.weekday() == 3]
+    out.add((thursdays[3] + pd.Timedelta(days=1)).date())   # viernes tras Thanksgiving
+    out.add(datetime.date(year, 12, 24))
+    out.add(datetime.date(year, 12, 31))
+    return frozenset(out)
+
+
+@functools.lru_cache(maxsize=4096)
+def us_no_entry_day(day):
+    """True si el dia de servidor (epoch // 86400) es feriado de EE. UU. o de cierre
+    anticipado: Momentum y NFP no entran (la salida de 21:00 puede no llegar)."""
+    d = (pd.Timestamp(0, unit="s") + pd.Timedelta(days=int(day))).date()
+    return d in _no_entry_dates(d.year)
 
 
 def trend_state(d1_close):

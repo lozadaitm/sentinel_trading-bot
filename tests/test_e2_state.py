@@ -60,6 +60,18 @@ def main():
         st3.load()
         check(st3.legs == {}, "JSON no-dict -> vacio")
 
+        # valores malformados: se descartan solo esos y se avisa en load_error
+        import json
+        with open(path, "w") as f:
+            json.dump({"bigone:100": entry("bigone", 100), "mom:100": "basura",
+                       "nfp:100": {"leg": "xx", "entry_epoch": 1},
+                       "bigone:101": {"leg": "bigone", "entry_epoch": None}}, f)
+        st4 = E2State(path)
+        st4.load()
+        check(list(st4.legs) == ["bigone:100"], "malformados descartados, el valido se queda")
+        check(st4.load_error and "mom:100" in st4.load_error,
+              "malformados -> load_error con las claves")
+
         # entered / active
         s = E2State(os.path.join(d, "a.json"))
         s.put(entry("bigone", 100, "skipped"))

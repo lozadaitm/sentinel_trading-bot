@@ -47,6 +47,11 @@ class E2Broker(FakeBroker):
         self.partial = {}       # prefijo de comentario -> volumen ejecutado (DONE_PARTIAL, una vez)
         self.gone = {}          # ticket -> volumen de las posiciones cerradas (historial)
         self.history_never = False  # historial que nunca confirma nada (devuelve [])
+        self.hedging = True         # modo de margen de la cuenta (None = lectura fallida)
+        self.none_result = {}       # prefijo -> cuantas ordenes devuelven None pero SI entran
+
+    def is_hedging_account(self):
+        return self.hedging
 
     def positions_checked(self):
         if self.empty_reads > 0:
@@ -79,12 +84,17 @@ class E2Broker(FakeBroker):
                 self.orders.append({"type": otype, "lots": lots, "comment": comment,
                                     "sl": sl, "rejected": True})
                 return SimpleNamespace(retcode=10019, order=0)
+        none_pref = next((pref for pref, n in self.none_result.items()
+                          if n > 0 and comment.startswith(pref)), None)
         part = next((pref for pref in self.partial if comment.startswith(pref)), None)
         vol = self.partial.pop(part) if part else lots
         r = super().market_order(otype, vol, comment, sl, tp)
         self._pos[-1].time = self.clock
         self.orders[-1]["tp"] = tp
         self.orders[-1]["lots"] = lots
+        if none_pref:
+            self.none_result[none_pref] -= 1
+            return None          # order_send devolvio None aunque la orden SI entro
         if part:
             return SimpleNamespace(retcode=mt5.TRADE_RETCODE_DONE_PARTIAL, order=r.order,
                                    volume=vol)
@@ -128,6 +138,7 @@ class Rig:
         self.day = day
         self.events = events or []
         self.opens = opens or {}
+        self.wall = 1_000_000.0     # reloj local simulado (watchdog de ticks)
         self.eng = self._mk(path)
 
     def _mk(self, path):
@@ -138,6 +149,8 @@ class Rig:
         eng._rates_d1 = lambda n: d1_frame(self.t // 86400, n)
         eng._rates_m15 = lambda n: m15_frame(self.t, self.opens, n)
         eng._events = lambda: list(self.events)
+        eng._calendar_status = lambda day: (True, "")
+        eng._wall = lambda: self.wall
         eng.is_active, eng.close_only = True, False
         eng.init_history_cursor()
         return eng
@@ -417,8 +430,13 @@ def test_estado_corrupto(d):
     r = Rig(path)
     check(os.path.exists(path + ".bak"), "corrupto: copia .bak")
     check(any("estado" in m.lower() for m in r.kinds("ERROR")), "corrupto: ERROR registrado")
+    check(any("BLOQUEADAS" in m for m in r.kinds("ERROR")), "corrupto: ERROR avisa del bloqueo")
     r.tick(TUE * 86400 + H + 5, 4000.0)
-    check(len(r.br.orders) == 3, "corrupto: sigue operando con estado vacio")
+    check(len(r.br.orders) == 0, "corrupto: sin entradas nuevas el dia de la carga", r.br.orders)
+    r.tick(TUE * 86400 + 15 * H + 5, 4000.0)
+    check(len(r.br.orders) == 0, "corrupto: tampoco entra mas tarde ese dia", r.br.orders)
+    r.tick((TUE + 1) * 86400 + H + 5, 4000.0)
+    check(len(r.br.orders) == 3, "corrupto: al dia siguiente vuelve a operar", r.br.orders)
 
 
 def test_lectura_vacia_no_cierra(d):
