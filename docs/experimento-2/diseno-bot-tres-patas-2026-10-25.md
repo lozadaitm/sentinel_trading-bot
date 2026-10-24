@@ -1,6 +1,9 @@
 # Diseño: bot del oro «tres patas» (Experimento 2) — 25-oct-2026
 
-> **Estado:** borrador para revisión del usuario. No se toca código del bot hasta que lo apruebe por escrito.
+> **Estado:** **APROBADO por el usuario el 25-oct-2026** («Sí a todo: 8 %, capitales confirmados, quitemos las demos actuales»).
+> Decisiones: D1 sí (cerrar el candado a la hora de salida); D2 8 %; D3 freno desactivado; D4 demos actuales
+> desactivadas (los .env se renombraron con «_» y se detuvieron sus bots; las posiciones abiertas quedaron como estaban);
+> D5 cuentas demo nuevas de 3 000 / 10 000 / 25 000.
 > Evidencia: `cuentas-scalping-2026-10-24.md`, `scalping-capital-multiactivo-2026-10-25.md`,
 > `correccion-artefacto-reapertura-2026-10-24.md` y la memoria [[decision-bigone-combo]].
 

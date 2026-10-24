@@ -1,6 +1,6 @@
 ---
 name: decision-bigone-combo
-description: [EN REVISIÓN: cifras infladas por artefacto de datos, ver correccion-artefacto-reapertura] Decisión (24-oct) del rumbo E2: Big One todos los días + satélites de noticias + riesgo por racha hasta 6 % + freno por caída; cualquier mejora que sume sin añadir riesgo se acepta
+description: APROBADO 25-oct (diseño tres patas, 8 %). Antes en revisión por el artefacto de datos. Decisión (24-oct) del rumbo E2: Big One todos los días + satélites de noticias + riesgo por racha hasta 6 % + freno por caída; cualquier mejora que sume sin añadir riesgo se acepta
 metadata:
   type: project
 ---
@@ -57,3 +57,7 @@ Detalle en `docs/experimento-2/banco-modelos-econometricos-2026-10-23.md`.
   - un diseño escrito aprobado por el usuario;
   - una demo aparte para medir el spread y el deslizamiento a la 01:00.
 - Las restricciones siguen vigentes ([[bot-design-constraints]]): sin stop catastrófico ni cierre de emergencia; el candado (Hedge Lock) sí está permitido.
+
+**Aprobación (2026-10-25):** el usuario aprobó el diseño `docs/experimento-2/diseno-bot-tres-patas-2026-10-25.md`
+con riesgo del 8 %, escalera y candado a 1 ATR diario que se cierra a la hora de salida. Patas: Big One, momentum
+EE.UU. y NFP. Nuevas demos de 3 000 / 10 000 / 25 000; las 3 demos viejas quedan desactivadas.
