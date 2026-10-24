@@ -154,4 +154,5 @@ Ejecución: bloque siguiente a la señal, al ask/bid reales, más comisión.
 | SC13 | Modelo lineal con todo a 1 min (retornos, desequilibrio, spread, volatilidad, hora) | ❌ correlación fuera de muestra 0,000 |
 | SC14 | Saltos no programados de 5 min, 2021–2026 (3 314 y 696 casos) | Seguirlos pierde todos los años. Revertir los grandes gana solo en 2025–26 |
 | SC15 | Subasta LBMA de la mañana (venta 12:20 → 12:35), 2021–2026 | −0,04 / −0,27 / −0,34 / −0,06 / **+0,56 / +1,75**: régimen nuevo desde 2025. Tarde: ≈ 0 |
-| SC10–11 | Dólar y plata al minuto; triángulo XAUEUR | Pendiente: los ticks de XAGUSD, USDX, XAUEUR+ y EURUSD+ se están bajando |
+| SC10 | Plata (XAGUSD) al minuto: movimiento > 3 o 5 desv. → oro en la misma dirección 1/5 min | ❌ B negativo (−0,18 a −0,44 $/oz). El broker no guarda historia de ticks del índice del dólar (USDX); su versión M5 con Dukascopy ya había fallado |
+| SC11 | Triángulo XAUEUR+ × EURUSD+ vs XAUUSD+ | ❌ Desvío medio de 0,07 $ (p99 0,47 $). Los desvíos grandes no se corrigen a favor: −0,07 a −0,27 $/oz en A |
