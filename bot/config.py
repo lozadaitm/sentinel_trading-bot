@@ -63,14 +63,16 @@ BOT_ID = os.environ.get("BOT_ID", "m15")
 
 MAGIC_M15 = int(os.environ.get("MAGIC_M15", "100100"))
 MAGIC_M5 = int(os.environ.get("MAGIC_M5", "100200"))
+# Motor e2 (tres patas, SessionEngine): independiente de m15 y m5.
+MAGIC_E2 = int(os.environ.get("MAGIC_E2", "100300"))
 
-ALL_MAGICS = (MAGIC_M15, MAGIC_M5)
+ALL_MAGICS = (MAGIC_M15, MAGIC_M5, MAGIC_E2)
 # Magics de los OTROS bots de la cuenta: para calcular la reserva de proteccion
 # sin necesidad de IPC ni de pasar por la DB. Ver bot/budget.py.
 PEER_MAGICS = tuple(m for m in ALL_MAGICS if m != MAGIC_NUMBER)
 
 # Magic que le corresponde a cada BOT_ID. Lo verifica validate_identity().
-EXPECTED_MAGIC = {"m15": MAGIC_M15, "m5": MAGIC_M5}
+EXPECTED_MAGIC = {"m15": MAGIC_M15, "m5": MAGIC_M5, "e2": MAGIC_E2}
 
 
 def validate_identity():
@@ -107,7 +109,7 @@ def validate_identity():
 
     if len(set(ALL_MAGICS)) != len(ALL_MAGICS):
         raise SystemExit(
-            f"\n[ABORTADO] MAGIC_M15 y MAGIC_M5 son el mismo numero ({MAGIC_M15}).\n"
+            f"\n[ABORTADO] MAGIC_M15, MAGIC_M5 y MAGIC_E2 deben ser distintos ({ALL_MAGICS}).\n"
             f"Deben ser distintos en TODOS los .env del mismo usuario.\n"
         )
     return warnings

@@ -208,23 +208,25 @@ foreach ($f in $envFiles) {
         $bots = @("m15")
     }
 
-    $desconocidos = @($bots | Where-Object { $_ -ne "m15" -and $_ -ne "m5" })
+    $desconocidos = @($bots | Where-Object { $_ -ne "m15" -and $_ -ne "m5" -and $_ -ne "e2" })
     if ($desconocidos.Count -gt 0) {
-        Write-Fail "$($f.Name): BOTS contiene motores desconocidos -> $($desconocidos -join ', '). Validos: m15, m5."
+        Write-Fail "$($f.Name): BOTS contiene motores desconocidos -> $($desconocidos -join ', '). Validos: m15, m5, e2."
         $hardFail = $true
         continue
     }
-    if (@($bots | Where-Object { $_ -eq "m15" }).Count -eq 0) {
+    if ((@($bots | Where-Object { $_ -eq "m15" }).Count -eq 0) -and (@($bots | Where-Object { $_ -eq "m5" }).Count -gt 0)) {
         Write-Warn "$($f.Name): BOTS no incluye m15. El M5 depende del Sentinel para la reserva de margen."
     }
 
     $magicM15 = 100100
     $magicM5  = 100200
+    $magicE2  = 100300
     if ($cfg.ContainsKey("MAGIC_M15")) { $magicM15 = [int]$cfg["MAGIC_M15"] }
     if ($cfg.ContainsKey("MAGIC_M5"))  { $magicM5  = [int]$cfg["MAGIC_M5"] }
-    if ($magicM15 -eq $magicM5) {
-        Write-Fail "$($f.Name): MAGIC_M15 y MAGIC_M5 son el mismo numero ($magicM15)."
-        Write-Host "         Los dos motores se verian las posiciones mutuamente." -ForegroundColor DarkGray
+    if ($cfg.ContainsKey("MAGIC_E2"))  { $magicE2  = [int]$cfg["MAGIC_E2"] }
+    if (($magicM15 -eq $magicM5) -or ($magicM15 -eq $magicE2) -or ($magicM5 -eq $magicE2)) {
+        Write-Fail "$($f.Name): MAGIC_M15 ($magicM15), MAGIC_M5 ($magicM5) y MAGIC_E2 ($magicE2) deben ser distintos."
+        Write-Host "         Los motores se verian las posiciones mutuamente." -ForegroundColor DarkGray
         $hardFail = $true
         continue
     }
@@ -235,11 +237,13 @@ foreach ($f in $envFiles) {
     Write-Ok "$($f.Name): usuario=$($cfg['USER_ID'].Substring(0,8))... symbol=$($cfg['SYMBOL']) motores=[$($bots -join ', ')] sombra=$shadow"
 
     foreach ($b in $bots) {
-        if ($b -eq "m5") { $magic = $magicM5;  $mod = "bot.main_m5" }
-        else             { $magic = $magicM15; $mod = "bot.main" }
+        if ($b -eq "m5")     { $magic = $magicM5;  $mod = "bot.main_m5" }
+        elseif ($b -eq "e2") { $magic = $magicE2;  $mod = "bot.main_e2" }
+        else                 { $magic = $magicM15; $mod = "bot.main" }
         if ($Lite) {
             if ($mod -eq "bot.main")    { $mod = "bot.lite" }
             if ($mod -eq "bot.main_m5") { $mod = "bot.lite_m5" }
+            if ($mod -eq "bot.main_e2") { $mod = "bot.lite_e2" }
         } elseif (-not $NoUI) {
             if ($mod -eq "bot.main")    { $mod = "bot.tui" }
             if ($mod -eq "bot.main_m5") { $mod = "bot.tui_m5" }
@@ -257,7 +261,8 @@ if ($hardFail) { Write-Host ""; Write-Fail "preflight fallido. No se arranca nad
 
 $m15 = @($instances | Where-Object { $_.BotId -eq "m15" })
 $m5  = @($instances | Where-Object { $_.BotId -eq "m5" })
-if ($m15.Count -eq 0) { Write-Fail "no hay ninguna instancia con BOT_ID=m15."; exit 1 }
+$e2  = @($instances | Where-Object { $_.BotId -eq "e2" })
+if (($m15.Count -eq 0) -and ($e2.Count -eq 0)) { Write-Fail "no hay ninguna instancia con BOT_ID=m15 ni e2."; exit 1 }
 if ($M15Only) { $m5 = @() }
 
 # Dos instancias del MISMO usuario deben apuntar al mismo simbolo y cuenta.
@@ -367,7 +372,7 @@ if ($SkipAudits) {
 # ==================================================================
 Write-Phase 4 "LANZAMIENTO"
 
-$aLanzar = @($m15) + @($m5)
+$aLanzar = @($m15) + @($m5) + @($e2)
 if ($DryRun) {
     Write-Warn "-DryRun: no se lanza nada. Se habrian abierto:"
     foreach ($i in $aLanzar) { Write-Host "         $($i.Name)  ->  $($i.Module)" }
@@ -388,6 +393,7 @@ if ($LASTEXITCODE -ne 0) { Write-Warn "mt5_prep fallo; se lanza igual (revisa Al
 foreach ($i in $aLanzar) {
     $etiqueta = "Sentinel M15"
     if ($i.BotId -eq "m5") { $etiqueta = "Grinder M5" }
+    if ($i.BotId -eq "e2") { $etiqueta = "Tres Patas E2" }
     Write-Host "  Lanzando $etiqueta ($($i.Name)) -> $($i.Module)" -ForegroundColor Green
     Start-Process powershell -ArgumentList @(
         "-NoExit", "-ExecutionPolicy", "Bypass",

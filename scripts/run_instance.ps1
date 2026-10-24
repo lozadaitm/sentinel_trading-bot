@@ -9,7 +9,7 @@
     Un .env = un USUARIO = una cuenta MT5. Los motores que corren sobre esa
     cuenta (m15, m5) NO necesitan .env propio: comparten credenciales y difieren
     unicamente en BOT_ID y MAGIC_NUMBER, que este script inyecta a partir de
-    -BotId y de MAGIC_M15 / MAGIC_M5.
+    -BotId y de MAGIC_M15 / MAGIC_M5 / MAGIC_E2.
 
     Para levantar todos los motores de todos los usuarios de golpe, con
     preflight y auditorias, usa scripts\start_all.ps1.
@@ -18,7 +18,7 @@
     Ruta al .env del usuario.
 
 .PARAMETER BotId
-    Motor a arrancar: m15 (Sentinel) o m5 (Grinder). Si se omite, se toma
+    Motor a arrancar: m15 (Sentinel), m5 (Grinder) o e2 (Tres Patas). Si se omite, se toma
     BOT_ID del .env, y si tampoco esta, m15.
 
 .PARAMETER UI
@@ -42,7 +42,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EnvFile,
 
-    [ValidateSet("m15", "m5", "")]
+    [ValidateSet("m15", "m5", "e2", "")]
     [string]$BotId = "",
 
     [switch]$UI,
@@ -78,10 +78,11 @@ $env:BOT_ID = $BotId
 
 # El magic se deriva del motor. Solo se respeta un MAGIC_NUMBER del .env si el
 # usuario NO pidio un motor concreto (compatibilidad con .env de una sola
-# instancia); en cuanto se pasa -BotId, manda el mapa MAGIC_M15 / MAGIC_M5.
+# instancia); en cuanto se pasa -BotId, manda el mapa MAGIC_M15 / MAGIC_M5 / MAGIC_E2.
 $magicMap = @{
     "m15" = $(if ($env:MAGIC_M15) { $env:MAGIC_M15 } else { "100100" })
     "m5"  = $(if ($env:MAGIC_M5)  { $env:MAGIC_M5 }  else { "100200" })
+    "e2"  = $(if ($env:MAGIC_E2)  { $env:MAGIC_E2 }  else { "100300" })
 }
 if ($PSBoundParameters.ContainsKey("BotId") -or -not $env:MAGIC_NUMBER) {
     $env:MAGIC_NUMBER = $magicMap[$BotId]
@@ -91,6 +92,9 @@ if ($PSBoundParameters.ContainsKey("BotId") -or -not $env:MAGIC_NUMBER) {
 if ($Module -eq "") {
     if ($env:MODULE) {
         $Module = $env:MODULE
+    } elseif ($BotId -eq "e2") {
+        # e2 no tiene TUI: -UI cae en el modo consola.
+        if ($Lite) { $Module = "bot.lite_e2" } else { $Module = "bot.main_e2" }
     } elseif ($BotId -eq "m5") {
         if ($Lite) { $Module = "bot.lite_m5" } elseif ($UI) { $Module = "bot.tui_m5" } else { $Module = "bot.main_m5" }
     } else {
@@ -100,6 +104,7 @@ if ($Module -eq "") {
 
 $etiqueta = "Sentinel M15"
 if ($BotId -eq "m5") { $etiqueta = "Grinder M5" }
+if ($BotId -eq "e2") { $etiqueta = "Tres Patas E2" }
 Write-Host "Arrancando $etiqueta | USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL BOT_ID=$env:BOT_ID MAGIC=$env:MAGIC_NUMBER (modulo: $Module)" -ForegroundColor Cyan
 
 # Correr desde la raiz del proyecto (padre de scripts/).

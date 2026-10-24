@@ -66,6 +66,7 @@ SYMBOL={symbol}
 BOTS={bots}
 MAGIC_M15=100100
 MAGIC_M5=100200
+MAGIC_E2=100300
 
 # --- Terminal MetaTrader 5 (clon portable propio de este usuario) ---
 MT5_PATH={mt5_path}
