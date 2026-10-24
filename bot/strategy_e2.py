@@ -58,6 +58,9 @@ ERR_EVERY_S = 60          # un ERROR repetido sale como mucho una vez por minuto
 PRUNE_KEEP_DAYS = 10      # patas closed/skipped que se conservan en el archivo
 DAY = 86400
 OK_RC = (mt5.TRADE_RETCODE_DONE,)
+GONE_RECHECK_S = 5        # re-consulta del historial de un ticket ausente
+RECONCILE_EVERY_S = 3600  # aviso de posiciones sin pata: al arrancar y cada hora
+OPENING_MISS_READS = 5    # lecturas seguidas sin tercios antes de dar por perdida una apertura
 
 
 def _is_weekday(day):
@@ -86,6 +89,10 @@ class SessionEngine:
         self._loaded = False
         self._dirty = False
         self._err_next = {}       # clave -> epoch a partir del cual se puede repetir el ERROR
+        self._gone_next = {}      # ticket -> epoch de la proxima consulta de historial
+        self._gone_ok = set()     # tickets con cierre confirmado en historial
+        self._opening_miss = {}   # id(pata opening) -> lecturas seguidas sin tercios
+        self._next_reconcile = 0
         self._pruned_day = None
 
     # ==============================================================
@@ -143,14 +150,17 @@ class SessionEngine:
                                     f"{where}. Se sigue con estado vacio.")
 
     def _persist(self):
+        """Guarda si hay cambios. False si el guardado fallo (queda pendiente)."""
         if not self._dirty:
-            return
+            return True
         try:
             self.state.save()
             self._dirty = False
+            return True
         except OSError as e:
             self._err("save", f"E2: no se pudo guardar el estado ({e}); "
                               f"se conserva en memoria y se reintenta.")
+            return False
 
     def _err(self, key, msg, price=0.0, lots=0.0, ticket=0):
         """ERROR con throttle por clave (una vez por minuto)."""
@@ -160,12 +170,59 @@ class SessionEngine:
         self.log.write("ERROR", msg, price, lots, self.b.account_balance(), ticket=ticket)
 
     def _ok(self, res):
+        """Cierre completado (solo DONE: un DONE_PARTIAL deja resto vivo y se reintenta)."""
         return self.b.shadow or (res is not None and getattr(res, "retcode", None) in OK_RC)
+
+    @staticmethod
+    def _filled(res, requested):
+        """Volumen ejecutado de una apertura (DONE o DONE_PARTIAL con ticket); 0 si no entro."""
+        if res is None or not getattr(res, "order", 0):
+            return 0.0
+        rc = getattr(res, "retcode", None)
+        if rc == mt5.TRADE_RETCODE_DONE:
+            return float(getattr(res, "volume", 0) or requested)
+        if rc == mt5.TRADE_RETCODE_DONE_PARTIAL:
+            return float(getattr(res, "volume", 0) or 0.0)
+        return 0.0
+
+    def _gone(self, t):
+        """True solo si el historial de MT5 confirma el cierre del ticket (deals OUT
+        >= IN). La mera ausencia en una lectura de posiciones NO basta: durante una
+        reconexion MT5 puede devolver una lista vacia o corta."""
+        if t in self._gone_ok:
+            return True
+        if self.now < self._gone_next.get(t, 0):
+            return False
+        self._gone_next[t] = self.now + GONE_RECHECK_S
+        try:
+            deals = self.b.history_deals_for_position(t) or []
+        except Exception:  # noqa: BLE001
+            return False
+        vin = sum(d.volume for d in deals if d.entry == mt5.DEAL_ENTRY_IN)
+        vout = sum(d.volume for d in deals
+                   if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY))
+        if vout > 0 and vout >= vin - 1e-9:
+            self._gone_ok.add(t)
+            return True
+        return False
 
     # ==============================================================
     # Tick
     # ==============================================================
     def on_tick(self):
+        """Nunca deja escapar una excepcion al bucle de main: se loguea (con
+        throttle por tipo) y el siguiente tick vuelve a intentar."""
+        try:
+            self._tick()
+        except Exception as exc:  # noqa: BLE001
+            self._err(f"tick:{type(exc).__name__}",
+                      f"E2: error en on_tick ({type(exc).__name__}: {exc}); se reintenta.")
+            try:
+                self._persist()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _tick(self):
         if not self._loaded:
             self._load_state()
         tick = self._fetch_tick()
@@ -176,6 +233,7 @@ class SessionEngine:
         day = self.now // DAY
         try:
             self._manage(tick)
+            self._reconcile()
             if self.is_active and not self.close_only:
                 self._entries(tick, day)
             if self._pruned_day != day:
@@ -186,6 +244,32 @@ class SessionEngine:
         finally:
             self._persist()
         self._update_hud(day)
+
+    def _tracked(self):
+        out = set()
+        for e in self.state.legs.values():
+            if e.get("status") in ("opening", "open", "locked"):
+                out |= {t for t in e.get("thirds", []) if t}
+                out |= {t for t, _ in self._locks(e)}
+        return out
+
+    def _reconcile(self):
+        """Aviso (al arrancar y luego cada hora) de posiciones del magic que no
+        gestiona ninguna pata activa: nadie les pondria candado ni salida."""
+        if self.now < self._next_reconcile:
+            return
+        self._next_reconcile = self.now + RECONCILE_EVERY_S
+        pos = self.b.positions_checked()
+        if pos is None:
+            self._next_reconcile = self.now + ERR_EVERY_S
+            return
+        tracked = self._tracked()
+        stray = [p for p in pos if p.ticket not in tracked]
+        if stray:
+            det = ", ".join(f"#{p.ticket} '{p.comment}' {p.volume:.2f}" for p in stray)
+            self.log.write("WARNING", f"E2: {len(stray)} posicion(es) del magic {self.b.magic} "
+                                      f"sin pata activa que las gestione: {det}.",
+                           balance=self.b.account_balance())
 
     # ==============================================================
     # Gestion de las patas vivas
@@ -206,39 +290,74 @@ class SessionEngine:
                 if e["status"] != "open":
                     continue
             if self.now >= e["exit_epoch"]:
-                self._close_leg(e, by_ticket, "salida por hora")
+                self._close_leg(e, pos, by_ticket, "salida por hora")
                 continue
-            live = self._live_thirds(e, by_ticket)
+            live, unknown = self._live_thirds(e, by_ticket)
             if e["status"] == "open":
                 if not live:
-                    self._finish(e, "sin tercios vivos")
+                    if not unknown and not self._leg_positions(e, pos):
+                        self._finish(e, "sin tercios vivos")
                     continue
-                if self._lock_hit(e, tick):
-                    self._open_lock(e, live, pos)
+                if self._locks(e) or self._lock_hit(e, tick):
+                    self._open_lock(e, live, pos, by_ticket)
                     continue
                 self._check_targets(e, tick, by_ticket)
-            elif not live and not self._lock_live(e, by_ticket):
-                self._finish(e, "sin posiciones vivas")
+            else:
+                if live and not unknown:
+                    self._open_lock(e, live, pos, by_ticket)   # completa si quedo corto
+                elif not live and not unknown and not self._locks_pending(e, by_ticket) \
+                        and not self._leg_positions(e, pos):
+                    self._finish(e, "sin posiciones vivas")
 
     def _live_thirds(self, e, by_ticket):
-        """Posiciones vivas de los tercios aun no cerrados. Los que desaparecieron
-        fuera del motor (cierre manual) se apuntan como cerrados."""
-        live = []
+        """(vivos, dudosos) de los tercios aun no cerrados. Un ticket ausente solo
+        se apunta como cerrado si el historial lo confirma; si no, queda dudoso."""
+        live, unknown = [], []
         for i, t in enumerate(e["thirds"]):
             if t is None or t in e["closed_thirds"]:
                 continue
             if t in by_ticket:
                 live.append(by_ticket[t])
-            else:
+            elif self._gone(t):
                 e["closed_thirds"].append(t)
                 self._dirty = True
-                self.log.write("SYSTEM", f"E2 {LEG_NAMES[e['leg']]} T{i + 1}: el ticket #{t} ya no "
-                                         f"existe en MT5 (cerrado fuera del motor).", ticket=t)
-        return live
+                self.log.write("SYSTEM", f"E2 {LEG_NAMES[e['leg']]} T{i + 1}: el ticket #{t} se "
+                                         f"cerro fuera del motor (confirmado en historial).", ticket=t)
+            else:
+                unknown.append(t)
+        return live, unknown
 
-    def _lock_live(self, e, by_ticket):
-        t = e.get("lock_ticket")
-        return bool(t) and not e.get("lock_closed") and t in by_ticket
+    def _leg_comment(self, e, comment):
+        name = LEG_NAMES[e["leg"]]
+        return comment.startswith(f"E2 {name} T") or comment == f"E2 Lock {name}"
+
+    def _leg_positions(self, e, pos):
+        """Posiciones vivas con comentario de esta pata abiertas desde su entrada."""
+        return [p for p in pos if self._leg_comment(e, p.comment or "")
+                and int(p.time) >= int(e["entry_epoch"])]
+
+    @staticmethod
+    def _locks(e):
+        """[[ticket, volumen]] del candado (admite el formato antiguo lock_ticket)."""
+        if "locks" not in e:
+            t = e.get("lock_ticket")
+            e["locks"] = [[t, None]] if t else []
+            e.setdefault("closed_locks", [t] if t and e.get("lock_closed") else [])
+        e.setdefault("closed_locks", [])
+        return e["locks"]
+
+    def _locks_pending(self, e, by_ticket):
+        """True si algun ticket del candado sigue vivo o sin cierre confirmado."""
+        pending = False
+        for t, _ in self._locks(e):
+            if t in e["closed_locks"]:
+                continue
+            if t in by_ticket or not self._gone(t):
+                pending = True
+            else:
+                e["closed_locks"].append(t)
+                self._dirty = True
+        return pending
 
     @staticmethod
     def _lock_hit(e, tick):
@@ -246,36 +365,62 @@ class SessionEngine:
             return tick.bid <= e["lock_price"]
         return tick.ask >= e["lock_price"]
 
-    def _open_lock(self, e, live, pos):
+    def _open_lock(self, e, live, pos, by_ticket):
+        """Abre (o completa) el candado hasta cubrir el volumen de los tercios vivos.
+        Un candado ya presente en MT5 (confirmacion tardia) se adopta, no se duplica."""
         name = LEG_NAMES[e["leg"]]
         comment = f"E2 Lock {name}"
-        vol = round(sum(p.volume for p in live), 2)
-        # Un candado que ya entro (p.ej. el broker confirmo tarde) se adopta, no se duplica.
-        own = {t for t in e["thirds"] if t}
-        orphan = next((p for p in pos if p.comment == comment and p.ticket not in own
-                       and int(p.time) >= int(e["entry_epoch"])), None)
-        if orphan is not None:
-            res_ticket = orphan.ticket
-        else:
+        locks = self._locks(e)
+        known = {t for t, _ in locks} | {t for t in e["thirds"] if t}
+        for p in pos:
+            if p.comment == comment and p.ticket not in known \
+                    and int(p.time) >= int(e["entry_epoch"]):
+                locks.append([p.ticket, float(p.volume)])
+                self._dirty = True
+                self.log.write("CANDADO", f"Candado {name} adoptado: #{p.ticket} {p.volume:.2f} lotes.",
+                               p.price_open, p.volume, self.b.account_balance(), ticket=p.ticket)
+
+        def covered():
+            v = 0.0
+            for t, vol in locks:
+                if t in e["closed_locks"]:
+                    continue
+                if t in by_ticket:
+                    v += by_ticket[t].volume
+                else:
+                    v += vol if vol is not None else float("inf")
+            return v
+
+        target = round(sum(p.volume for p in live), 2)
+        need = round(target - covered(), 2)
+        if need >= 0.01 - 1e-9:
             otype = mt5.ORDER_TYPE_SELL if e["side"] == "buy" else mt5.ORDER_TYPE_BUY
-            res = self.b.market_order(otype, vol, comment, sl=0.0, tp=0.0)
-            if not self._ok(res):
+            res = self.b.market_order(otype, need, comment, sl=0.0, tp=0.0)
+            got = need if self.b.shadow else self._filled(res, need)
+            if got <= 0:
                 rc = getattr(res, "retcode", "sin respuesta del broker")
                 self._err(f"lock:{e['leg']}",
-                          f"Candado {name} FALLIDO (retcode {rc}) por {vol:.2f} lotes. "
+                          f"Candado {name} FALLIDO (retcode {rc}) por {need:.2f} lotes. "
                           f"Entrada DESNUDA; se reintenta en cada tick.",
-                          e["lock_price"], vol)
+                          e["lock_price"], need)
                 return
-            res_ticket = getattr(res, "order", 0) or None
-        e["lock_ticket"] = res_ticket
-        e["lock_closed"] = False
-        e["status"] = "locked"
-        e["locked_at"] = self.now
-        self._dirty = True
-        self.log.write("CANDADO", f"Candado {name} {'adoptado' if orphan else 'abierto'}: "
-                                  f"{vol:.2f} lotes opuestos a {e['side']}; precio gatillo "
-                                  f"{e['lock_price']:.2f}. Perdida congelada hasta la salida.",
-                       e["lock_price"], vol, self.b.account_balance(), ticket=res_ticket or 0)
+            tkt = getattr(res, "order", 0) or None
+            if tkt:
+                locks.append([tkt, round(got, 2)])
+            self._dirty = True
+            self.log.write("CANDADO", f"Candado {name} abierto: {got:.2f} de {need:.2f} lotes "
+                                      f"opuestos a {e['side']}; precio gatillo {e['lock_price']:.2f}. "
+                                      f"Perdida congelada hasta la salida.",
+                           e["lock_price"], got, self.b.account_balance(), ticket=tkt or 0)
+        if locks and not e.get("lock_ticket"):
+            e["lock_ticket"] = locks[0][0]
+        if covered() >= target - 1e-9 and e["status"] != "locked":
+            e["status"] = "locked"
+            e["locked_at"] = self.now
+            self._dirty = True
+        elif e["status"] != "locked":
+            self._err(f"lockpart:{e['leg']}", f"Candado {name} PARCIAL: cubre {covered():.2f} de "
+                                              f"{target:.2f} lotes; se completa en el proximo tick.")
 
     def _check_targets(self, e, tick, by_ticket):
         name = LEG_NAMES[e["leg"]]
@@ -302,13 +447,16 @@ class SessionEngine:
                                      f"PnL: {money:.2f}", tp, p.volume,
                            self.b.account_balance(), ticket=t)
 
-    def _close_leg(self, e, by_ticket, reason):
-        """Cierra tercios abiertos y candado. closed solo cuando no queda nada vivo."""
+    def _close_leg(self, e, pos, by_ticket, reason):
+        """Cierra tercios abiertos, candado y cualquier posicion viva con comentario
+        de la pata. closed solo cuando no queda nada vivo ni dudoso."""
         name = LEG_NAMES[e["leg"]]
         all_done = True
         targets = [(t, "third") for t in e["thirds"] if t and t not in e["closed_thirds"]]
-        if e.get("lock_ticket") and not e.get("lock_closed"):
-            targets.append((e["lock_ticket"], "lock"))
+        targets += [(t, "lock") for t, _ in self._locks(e) if t not in e["closed_locks"]]
+        known = {t for t, _ in targets}
+        targets += [(p.ticket, "extra") for p in self._leg_positions(e, pos)
+                    if p.ticket not in known]
         for t, kind in targets:
             p = by_ticket.get(t)
             if p is not None:
@@ -323,9 +471,12 @@ class SessionEngine:
                 e["pnl"] = e.get("pnl", 0.0) + money
                 self.log.write("CIERRE", f"E2 {name} #{t} cerrado ({reason}). PnL: {money:.2f}",
                                p.price_current, p.volume, self.b.account_balance(), ticket=t)
+            elif not self._gone(t):
+                all_done = False   # ausente sin cierre confirmado: lectura dudosa, se reintenta
+                continue
             if kind == "lock":
-                e["lock_closed"] = True
-            else:
+                e["closed_locks"].append(t)
+            elif kind == "third":
                 e["closed_thirds"].append(t)
             self._dirty = True
         if all_done:
@@ -334,6 +485,8 @@ class SessionEngine:
     def _finish(self, e, reason):
         e["status"] = "closed"
         e["closed_at"] = self.now
+        if e.get("locks") and all(t in e.get("closed_locks", []) for t, _ in e["locks"]):
+            e["lock_closed"] = True
         self._dirty = True
         self.log.write("CIERRE", f"Pata {LEG_NAMES[e['leg']]} cerrada ({reason}). "
                                  f"P&L total: {e.get('pnl', 0.0):.2f}",
@@ -341,7 +494,8 @@ class SessionEngine:
 
     def _adopt_opening(self, e, pos):
         """Pata que quedo en 'opening' (caida entre envio y guardado): adopta los
-        tercios vivos por comentario; si no hay ninguno, la da por omitida."""
+        tercios vivos por comentario. Solo la da por omitida tras varias lecturas
+        seguidas sin ninguno (una lectura vacia puede ser una reconexion)."""
         name = LEG_NAMES[e["leg"]]
         for i in range(3):
             if e["thirds"][i] is None:
@@ -349,14 +503,20 @@ class SessionEngine:
                           and int(p.time) >= int(e["entry_epoch"])), None)
                 if p is not None:
                     e["thirds"][i] = p.ticket
+                    e["lots"][i] = float(p.volume)
         fills = {p.ticket: p.price_open for p in pos}
-        first = next((t for t in e["thirds"] if t is not None), None)
-        self._dirty = True
+        first = next((t for t in e["thirds"] if t is not None and t in fills), None)
         if first is None:
+            k = id(e)
+            self._opening_miss[k] = self._opening_miss.get(k, 0) + 1
+            if self._opening_miss[k] < OPENING_MISS_READS:
+                return
             e["status"] = "skipped"
             e["reason"] = "caida durante la apertura, sin tercios vivos"
+            self._dirty = True
             self.log.write("OMITIDA", f"E2 {name}: apertura interrumpida y sin tercios en MT5.")
             return
+        self._dirty = True
         self._arm(e, fills[first])
         self.log.write("SYSTEM", f"E2 {name}: apertura interrumpida recuperada; tercios "
                                  f"adoptados {e['thirds']}.")
@@ -385,12 +545,18 @@ class SessionEngine:
             out.append(("mom", day * DAY + 15 * 3600, None))
         if "nfp" in legs:
             for ev in self._events():
-                if NFP_EVENT_NAME in ev.get("name", ""):
+                if str(ev.get("name", "")).strip() == NFP_EVENT_NAME:
                     T = (int(ev["time"]) // sessions.SLOT) * sessions.SLOT
                     if (T + 3600) // DAY == day:
                         out.append(("nfp", T + 3600, T))
                         break
         return out
+
+    @staticmethod
+    def _is_bigone_event(name):
+        """NFP, IPC o FOMC; los ADP ('ADP Non-Farm Employment Change') no cuentan."""
+        name = name.strip()
+        return not name.startswith("ADP") and any(w in name for w in BIGONE_EVENT_WORDS)
 
     def _entries(self, tick, day):
         if not _is_weekday(day):
@@ -439,7 +605,7 @@ class SessionEngine:
         if leg == "bigone":
             side = 1
             event_day = any(int(ev["time"]) // DAY == day
-                            and any(w in ev.get("name", "") for w in BIGONE_EVENT_WORDS)
+                            and self._is_bigone_event(str(ev.get("name", "")))
                             for ev in self._events())
             weight = sessions.bigone_weight(s, event_day,
                                             float(self._p("e2_bigone_weight_nontrend")),
@@ -481,24 +647,36 @@ class SessionEngine:
         e = {"leg": leg, "side": "buy" if side == 1 else "sell", "entry_epoch": self.now,
              "exit_epoch": sessions.exit_epoch(leg, self.now, int(self._p("e2_nfp_hold_bars"))),
              "entry_price": None, "atr_d": atr_d, "atr15": a15, "s": s, "weight": weight,
-             "lots": lots, "lock_price": None, "tp": [None, None, None],
+             "lots": list(lots), "lots_plan": list(lots), "lock_price": None, "tp": [None, None, None],
              "thirds": [None, None, None], "closed_thirds": [], "lock_ticket": None,
              "lock_closed": False, "pnl": 0.0, "status": "opening"}
-        self.state.put(e)
+        k = self.state.put(e)
         self._dirty = True
-        self._persist()   # antes de enviar: una caida a mitad no duplica la entrada
+        if not self._persist():
+            # Sin el registro 'opening' en disco, una caida a mitad permitiria reabrir.
+            del self.state.legs[k]
+            self.log.write("ERROR", f"E2 {name}: no se pudo persistir la apertura; NO se envian "
+                                    f"ordenes (se reintenta dentro de la ventana).",
+                           balance=balance)
+            return
 
         ref = tick.ask if side == 1 else tick.bid
         spread = tick.ask - tick.bid
         fill = None
         for i in range(3):
             res = self.b.market_order(otype, lots[i], f"E2 {name} T{i + 1}", sl=0.0, tp=0.0)
-            if not self._ok(res) or not getattr(res, "order", 0):
+            got_i = self._filled(res, lots[i])
+            if got_i <= 0:
+                e["lots"][i] = 0.0
                 self.log.write("ERROR", f"E2 {name} T{i + 1} RECHAZADA (retcode "
                                         f"{getattr(res, 'retcode', None)}); no se reintenta.",
                                ref, lots[i], balance)
                 continue
             e["thirds"][i] = res.order
+            e["lots"][i] = round(got_i, 2)
+            if got_i < lots[i] - 1e-9:
+                self.log.write("ERROR", f"E2 {name} T{i + 1} ejecucion PARCIAL: {got_i:.2f} de "
+                                        f"{lots[i]:.2f} lotes.", ref, got_i, balance, ticket=res.order)
             if fill is None:
                 fill = float(getattr(res, "price", 0.0) or 0.0) or ref
         if fill is None:
@@ -508,7 +686,7 @@ class SessionEngine:
             return
         self._arm(e, fill)
         self._dirty = True
-        got = sum(l for l, t in zip(lots, e["thirds"]) if t)
+        got = round(sum(l for l, t in zip(e["lots"], e["thirds"]) if t), 2)
         risk = sessions.effective_risk(got, atr_d, balance) if balance > 0 else float("nan")
         e["effective_risk"] = risk
         self.log.write(
@@ -532,7 +710,12 @@ class SessionEngine:
             return True
         total = 0.0
         closed = 0
-        for p in self.b.positions():
+        pos = self.b.positions_checked()
+        if pos is None:
+            self.log.write("ERROR", f"Cierre forzado ({reason}): lectura de posiciones fallida; "
+                                    f"se reintenta.", balance=self.b.account_balance())
+            return False
+        for p in pos:
             money = p.profit + p.swap
             res = self.b.close_position(p, "Close: Forzado (usuario)")
             rc = getattr(res, "retcode", None)
@@ -545,7 +728,8 @@ class SessionEngine:
             closed += 1
             self.log.write("CIERRE", f"Leg cerrado ({reason}). PnL: {money:.2f}",
                            p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
-        if self.b.positions():
+        after = self.b.positions_checked()
+        if after is None or after:
             return False
         for e in self.state.legs.values():
             if e.get("status") in ("opening", "open", "locked"):

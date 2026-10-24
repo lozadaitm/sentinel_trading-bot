@@ -42,6 +42,28 @@ class E2Broker(FakeBroker):
         self.close_reject = 0   # cuantos cierres rechazar
         self.clock = 0
         self.closes = []
+        self.empty_reads = 0    # lecturas de posiciones que devuelven [] (reconexion MT5)
+        self.partial = {}       # prefijo de comentario -> volumen ejecutado (DONE_PARTIAL, una vez)
+        self.gone = {}          # ticket -> volumen de las posiciones cerradas (historial)
+
+    def positions_checked(self):
+        if self.empty_reads > 0:
+            self.empty_reads -= 1
+            return []
+        return super().positions_checked()
+
+    def history_deals_for_position(self, ticket):
+        if ticket in self.gone:
+            v = self.gone[ticket]
+            return [SimpleNamespace(entry=mt5.DEAL_ENTRY_IN, volume=v),
+                    SimpleNamespace(entry=mt5.DEAL_ENTRY_OUT, volume=v)]
+        p = next((p for p in self._pos if p.ticket == ticket), None)
+        return [SimpleNamespace(entry=mt5.DEAL_ENTRY_IN, volume=p.volume)] if p else []
+
+    def external_close(self, ticket):
+        p = next(p for p in self._pos if p.ticket == ticket)
+        self._pos.remove(p)
+        self.gone[ticket] = p.volume
 
     def check_free_margin(self, lots, order_type):
         return True
@@ -53,9 +75,15 @@ class E2Broker(FakeBroker):
                 self.orders.append({"type": otype, "lots": lots, "comment": comment,
                                     "sl": sl, "rejected": True})
                 return SimpleNamespace(retcode=10019, order=0)
-        r = super().market_order(otype, lots, comment, sl, tp)
+        part = next((pref for pref in self.partial if comment.startswith(pref)), None)
+        vol = self.partial.pop(part) if part else lots
+        r = super().market_order(otype, vol, comment, sl, tp)
         self._pos[-1].time = self.clock
         self.orders[-1]["tp"] = tp
+        self.orders[-1]["lots"] = lots
+        if part:
+            return SimpleNamespace(retcode=mt5.TRADE_RETCODE_DONE_PARTIAL, order=r.order,
+                                   volume=vol)
         return r
 
     def close_position(self, p, comment="Close"):
@@ -63,6 +91,7 @@ class E2Broker(FakeBroker):
             self.close_reject -= 1
             return SimpleNamespace(retcode=10019)
         self.closes.append((p.ticket, comment))
+        self.gone[p.ticket] = p.volume
         return super().close_position(p, comment)
 
 
@@ -388,6 +417,130 @@ def test_estado_corrupto(d):
     check(len(r.br.orders) == 3, "corrupto: sigue operando con estado vacio")
 
 
+def test_lectura_vacia_no_cierra(d):
+    """C1: una lectura vacia de posiciones (reconexion) no da tercios por cerrados."""
+    r = opened_bigone(d, "empty")
+    r.br.empty_reads = 1
+    r.tick(TUE * 86400 + 2 * H, 4000.0)
+    e = r.leg("bigone")
+    check(e["status"] == "open" and e["closed_thirds"] == [],
+          "lectura vacia: la pata sigue open sin tercios cerrados", e)
+    r.tick(TUE * 86400 + 2 * H + 10, 3960.0)
+    check(r.leg("bigone")["status"] == "locked", "lectura vacia: despues sigue gestionando (candado)")
+    r.tick(TUE * 86400 + 10 * H, 3960.0)
+    check(not r.br.positions() and r.leg("bigone")["status"] == "closed",
+          "lectura vacia: y cierra todo a la salida", r.br.positions())
+    # cierre externo real: confirmado por historial -> se apunta como cerrado
+    r2 = opened_bigone(d, "extclose")
+    t2 = r2.leg("bigone")["thirds"][1]
+    r2.br.external_close(t2)
+    r2.tick(TUE * 86400 + 2 * H, 4000.0)
+    check(t2 in r2.leg("bigone")["closed_thirds"], "cierre externo confirmado en historial")
+
+
+def test_salida_lectura_vacia(d):
+    """M5: a la hora de salida una lectura vacia no marca la pata closed."""
+    r = opened_bigone(d, "exitempty")
+    r.br.empty_reads = 1
+    r.tick(TUE * 86400 + 10 * H, 4000.0)
+    check(r.leg("bigone")["status"] == "open" and len(r.br.positions()) == 3,
+          "salida con lectura vacia: no se marca closed", r.leg("bigone"))
+    r.tick(TUE * 86400 + 10 * H + 1, 4000.0)
+    check(r.leg("bigone")["status"] == "closed" and not r.br.positions(),
+          "salida con lectura vacia: cierra al tick siguiente", r.br.positions())
+
+
+def test_close_all_lectura_fallida(d):
+    """C2: close_all con lectura fallida devuelve False y no marca patas cerradas."""
+    r = opened_bigone(d, "cafail")
+    r.br.pos_fail = True
+    check(r.eng.close_all("x") is False, "close_all: lectura fallida -> False")
+    check(r.leg("bigone")["status"] == "open", "close_all: la pata no se marca closed")
+    r.br.pos_fail = False
+    check(r.eng.close_all("x") is True and not r.br.positions(), "close_all: luego cierra")
+
+
+def test_adp_no_cuenta(d):
+    """I1: el ADP no es el NFP ni hace dia de evento para la Big One."""
+    T = FRI * 86400 + 15 * H + 15 * 60
+    events = [{"time": T, "name": "ADP Non-Farm Employment Change", "currency": "USD",
+               "importance": "high"}]
+    r = Rig(fresh_path(d, "adp"), day=FRI, events=events, opens={T - 900: 4000.0})
+    r.tick(FRI * 86400 + H + 5, 4000.0)
+    lots = sessions.ladder_lots(10000.0, 0.08, 1.0, 40.0)
+    check([o["lots"] for o in r.br.orders] == lots, "ADP: la Big One va a peso completo",
+          r.br.orders)
+    r.tick(T + 3600 + 3, 3990.0)
+    check(not [o for o in r.br.orders if o["comment"].startswith("E2 NFP")],
+          "ADP: no dispara la pata NFP", r.br.orders)
+
+
+def test_ejecucion_parcial(d):
+    """I2: DONE_PARTIAL en un tercio se rastrea; el candado parcial se completa."""
+    r = Rig(fresh_path(d, "partial"))
+    r.br.partial["E2 BigOne T2"] = 0.03
+    r.tick(TUE * 86400 + H + 5, 4000.0)
+    e = r.leg("bigone")
+    check(e["thirds"][1] is not None and abs(e["lots"][1] - 0.03) < 1e-9,
+          "parcial: T2 rastreado con 0,03 lotes", e)
+    r.br.partial["E2 Lock"] = 0.05
+    r.tick(TUE * 86400 + 2 * H, 3960.0)
+    check(r.leg("bigone")["status"] == "open", "candado parcial: aun no locked", r.leg("bigone"))
+    r.tick(TUE * 86400 + 2 * H + 1, 4000.0)     # el precio ya se fue, pero se completa igual
+    locks = [p for p in r.br.positions() if p.comment == "E2 Lock BigOne"]
+    vol = round(sum(p.volume for p in locks), 2)
+    check(r.leg("bigone")["status"] == "locked" and abs(vol - 0.15) < 1e-9,
+          "candado parcial: se completa hasta el volumen de los tercios (0,15)", (vol, locks))
+    r.tick(TUE * 86400 + 2 * H + 2, 3950.0)
+    check(len([p for p in r.br.positions() if p.comment == "E2 Lock BigOne"]) == 2,
+          "candado: no se agranda de mas")
+    r.tick(TUE * 86400 + 10 * H, 3950.0)
+    check(not r.br.positions(), "parcial: la salida cierra los dos tickets de candado")
+
+
+def test_excepcion_en_tick(d):
+    """I3: una excepcion persistente no escapa de on_tick y se loguea con throttle."""
+    r = Rig(fresh_path(d, "exc"))
+
+    def boom(n):
+        raise ValueError("velas rotas")
+    r.eng._rates_d1 = boom
+    raised = False
+    try:
+        r.tick(TUE * 86400 + H + 5, 4000.0)
+        r.tick(TUE * 86400 + H + 6, 4000.0)
+    except Exception:  # noqa: BLE001
+        raised = True
+    errs = [m for m in r.kinds("ERROR") if "velas rotas" in m]
+    check(not raised, "excepcion: no escapa de on_tick")
+    check(len(errs) == 1, "excepcion: un ERROR por minuto", r.lg.events)
+
+
+def test_persistencia_previa_fallida(d):
+    """M1: si no se puede guardar el registro opening, no se envian ordenes."""
+    r = Rig(fresh_path(d, "savefail"))
+
+    def nosave():
+        raise OSError("disco lleno")
+    r.eng.state.save = nosave
+    r.tick(TUE * 86400 + H + 5, 4000.0)
+    check(len(r.br.orders) == 0, "persistencia fallida: no se envian ordenes", r.br.orders)
+    check(any("persistir" in m for m in r.kinds("ERROR")), "persistencia fallida: ERROR")
+
+
+def test_aviso_posiciones_sueltas(d):
+    """M6: al arrancar se avisa de posiciones del magic que no gestiona ninguna pata."""
+    br = E2Broker()
+    br._pos.append(FakePos(77, mt5.POSITION_TYPE_BUY, 0.05, 4000.0, TUE * 86400,
+                           "manual", MAGIC))
+    r = Rig(fresh_path(d, "stray"), br=br)
+    r.tick(TUE * 86400 + 5 * H, 4000.0)
+    w = r.kinds("WARNING")
+    check(len(w) == 1 and "#77" in w[0], "posiciones sueltas: WARNING al arrancar", r.lg.events)
+    r.tick(TUE * 86400 + 5 * H + 60, 4000.0)
+    check(len(r.kinds("WARNING")) == 1, "posiciones sueltas: throttle horario")
+
+
 def main():
     config.ALERT_EMAIL_TO = ""
     with tempfile.TemporaryDirectory() as d:
@@ -396,7 +549,10 @@ def main():
                    test_salida_cierra_todo_con_candado, test_salida_cierre_fallido_reintenta,
                    test_reinicio, test_arranque_tras_salida, test_momentum_umbral,
                    test_nfp_viernes, test_close_all, test_recuperacion_tras_caida,
-                   test_estado_corrupto):
+                   test_estado_corrupto, test_lectura_vacia_no_cierra,
+                   test_salida_lectura_vacia, test_close_all_lectura_fallida,
+                   test_adp_no_cuenta, test_ejecucion_parcial, test_excepcion_en_tick,
+                   test_persistencia_previa_fallida, test_aviso_posiciones_sueltas):
             print(f"[{fn.__name__}]")
             try:
                 fn(d)
