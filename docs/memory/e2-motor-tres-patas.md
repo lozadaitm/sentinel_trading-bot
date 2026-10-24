@@ -19,4 +19,4 @@ metadata:
 - Arrancar: en el `.env` de la instancia `BOTS=e2` (BOT_ID/magic los valida `config.validate_identity`), luego `scripts/start_all.ps1`.
 - Apagar una pata: en `bot_config`, `e2_legs` (por defecto `bigone,mom,nfp`); quitar el nombre de la lista.
 - Seguridad: al salir se cierran el candado y los tercios juntos (se realiza la pérdida congelada); un ticket ausente sin confirmar en el historial espera (no se da por cerrado antes de N lecturas y 15 min); una posición con magic 100300 que el estado no reconoce genera un WARNING y no se toca.
-- Colector de ticks: cuando exista una cuenta nueva, apuntarlo con `--login` a ella ([[tick-collector]]); hoy usa el terminal de 26275221.
+- Colector de ticks: cuando exista una cuenta nueva, apuntarlo con `--login` a ella ([[tick-collector]]); hoy usa el terminal de la demo vieja de 5k (ver [[demos-viejas-desactivadas]]).

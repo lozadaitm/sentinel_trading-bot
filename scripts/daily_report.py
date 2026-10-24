@@ -91,9 +91,10 @@ def _read_mt5(env):
         now_local = dt.datetime.now()
         deals = list(mt5.history_deals_get(now_local - dt.timedelta(days=2),
                                            now_local + dt.timedelta(days=1)) or ())
+        all_deals = deals
         since = tick.time - 86400
         deals = [d for d in deals if d.time >= since]
-        return dict(balance=ai.balance, equity=ai.equity, positions=pos, deals=deals,
+        return dict(balance=ai.balance, equity=ai.equity, positions=pos, deals=deals, deals_2d=all_deals,
                     server_time=tick.time, bid=tick.bid)
     finally:
         mt5.shutdown()
@@ -110,7 +111,7 @@ def _e2_leg(comment):
     return None
 
 
-def _e2_summary(positions, deals):
+def _e2_summary(positions, deals, history=None):
     """Resumen de e2 (magic 100300): abiertas, flotante, realizado y cierres por pata.
 
     positions/deals: objetos con .magic/.profit/.swap/.commission/.comment/.entry/.position_id.
@@ -120,7 +121,7 @@ def _e2_summary(positions, deals):
     if not pos and not outs and not any(d.magic == MAGIC_E2 for d in deals):
         return None
     leg_by_pid = {}
-    for d in deals:
+    for d in (history if history is not None else deals):
         if d.magic == MAGIC_E2 and d.entry == mt5.DEAL_ENTRY_IN and _e2_leg(d.comment):
             leg_by_pid[d.position_id] = _e2_leg(d.comment)
     for p in pos:
@@ -167,7 +168,7 @@ def _account(iid, env, prev, since_iso):
             a[f"real_{k}"] = sum(d.profit + d.swap + d.commission for d in ds)
             a[f"n_{k}"] = len(ds)
         a["m5_open"] = sum(1 for p in m["positions"] if p.magic == MAGIC_M5)
-        a["e2"] = _e2_summary(m["positions"], m["deals"])
+        a["e2"] = _e2_summary(m["positions"], m["deals"], m.get("deals_2d"))
     a["bag"] = _ledger_budget(iid)
     # Logs de 24 h
     try:
