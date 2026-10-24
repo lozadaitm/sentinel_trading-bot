@@ -175,3 +175,13 @@ Todas son en hora del servidor (NY + 7 h, igual que las velas del broker).
 | **D3** | Freno opcional por caída: el riesgo baja en proporción a la caída, sin cerrar nada | Activado / **desactivado (no simulado con escalera)** |
 | **D4** | Qué hacer con las 3 demo actuales y sus bots M15/M5 | Dejarlos como están / detenerlos (requiere tu permiso explícito) |
 | **D5** | Capitales de las demo nuevas | **3 000 / 10 000 / 25 000** u otros |
+
+## 12. Implementación
+
+Estado: **implementado, pendiente de prueba en demo.**
+
+- Plan: [`docs/superpowers/plans/2026-10-25-bot-tres-patas-e2.md`](../superpowers/plans/2026-10-25-bot-tres-patas-e2.md).
+- Motor: `bot/strategy_e2.py` (`SessionEngine`), reglas puras en `bot/sessions.py`, estado en `bot/e2_state.py`, entrada `bot/main_e2.py`.
+- Pruebas: `tests/test_e2_*.py`, `tests/test_daily_report_e2.py`.
+- Reporte diario: `scripts/daily_report.py` (sección e2 por pata).
+- Memoria: `docs/memory/e2-motor-tres-patas.md`.

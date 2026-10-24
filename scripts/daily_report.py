@@ -33,7 +33,8 @@ from bot import config, notify  # noqa: E402  (config carga el .env raiz)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTANCES_DIR = os.path.join(ROOT, "instances")
 STATE_PATH = os.path.join(INSTANCES_DIR, "daily_report_state.json")
-MAGIC_M15, MAGIC_M5 = 100100, 100200
+MAGIC_M15, MAGIC_M5, MAGIC_E2 = 100100, 100200, config.MAGIC_E2
+E2_LEGS = ("BigOne", "MomUS", "NFP")
 SYMBOL = "XAUUSD+"
 HEARTBEAT_STALE_S = 180
 
@@ -98,6 +99,47 @@ def _read_mt5(env):
         mt5.shutdown()
 
 
+def _e2_leg(comment):
+    """Pata de e2 segun el comentario ('E2 BigOne T1', 'E2 Lock NFP', 'E2 Salida MomUS'...), o None."""
+    c = comment or ""
+    if not c.startswith("E2 "):
+        return None
+    for leg in E2_LEGS:
+        if leg in c.split():
+            return leg
+    return None
+
+
+def _e2_summary(positions, deals):
+    """Resumen de e2 (magic 100300): abiertas, flotante, realizado y cierres por pata.
+
+    positions/deals: objetos con .magic/.profit/.swap/.commission/.comment/.entry/.position_id.
+    `deals` ya filtrados a 24 h. Devuelve dict o None si no hay nada de e2."""
+    pos = [p for p in positions if p.magic == MAGIC_E2]
+    outs = [d for d in deals if d.magic == MAGIC_E2 and d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)]
+    if not pos and not outs and not any(d.magic == MAGIC_E2 for d in deals):
+        return None
+    leg_by_pid = {}
+    for d in deals:
+        if d.magic == MAGIC_E2 and d.entry == mt5.DEAL_ENTRY_IN and _e2_leg(d.comment):
+            leg_by_pid[d.position_id] = _e2_leg(d.comment)
+    for p in pos:
+        if _e2_leg(p.comment):
+            leg_by_pid[getattr(p, "ticket", None)] = _e2_leg(p.comment)
+    legs = {k: dict(open=0, floating=0.0, closes=0, real=0.0) for k in E2_LEGS + ("?",)}
+    for p in pos:
+        g = legs[_e2_leg(p.comment) or "?"]
+        g["open"] += 1
+        g["floating"] += p.profit + p.swap
+    for d in outs:
+        g = legs[_e2_leg(d.comment) or leg_by_pid.get(d.position_id) or "?"]
+        g["closes"] += 1
+        g["real"] += d.profit + d.swap + d.commission
+    return dict(open=len(pos), floating=sum(p.profit + p.swap for p in pos),
+                real=sum(g["real"] for g in legs.values()), closes=len(outs),
+                legs={k: v for k, v in legs.items() if k != "?" or v["open"] or v["closes"]})
+
+
 def _ledger_budget(iid):
     try:
         with open(os.path.join(INSTANCES_DIR, f"cycle_ledger_m15_{iid}.json"), encoding="utf-8") as f:
@@ -125,6 +167,7 @@ def _account(iid, env, prev, since_iso):
             a[f"real_{k}"] = sum(d.profit + d.swap + d.commission for d in ds)
             a[f"n_{k}"] = len(ds)
         a["m5_open"] = sum(1 for p in m["positions"] if p.magic == MAGIC_M5)
+        a["e2"] = _e2_summary(m["positions"], m["deals"])
     a["bag"] = _ledger_budget(iid)
     # Logs de 24 h
     try:
@@ -187,6 +230,13 @@ def _lines(a):
                  + (f" (cambio desde el reporte anterior {_money(d_sw)})" if d_sw is not None else ""))
         estado = "CONGELADO (neto 0, en rojo)" if a["frozen"] else ("sin ciclo" if a["legs"] == 0 else "activo")
         L.append(f"  Ciclo M15: {a['legs']} patas, neto {a['net']:+.2f}, flotante {_money(a['floating'])} -> {estado}")
+    e2 = a.get("e2")
+    if e2:
+        L.append(f"  e2 (tres patas): {e2['open']} abiertas, flotante {_money(e2['floating'])}"
+                 f" | realizado 24 h {_money(e2['real'])} ({e2['closes']} cierres)")
+        for leg, g in e2["legs"].items():
+            L.append(f"    - {leg}: {g['open']} abiertas (flotante {_money(g['floating'])}),"
+                     f" {g['closes']} cierres, realizado {_money(g['real'])}")
     L.append(f"  Bolsa del curador: {_money(a['bag'], False)}")
     L.append(f"  Curador 24 h: {len(a['cuts'])} recortes por parejas, {len(a['amps'])} amputaciones; Op4 abiertas: {a['op4']}")
     for m_ in a["cuts"] + a["amps"]:
