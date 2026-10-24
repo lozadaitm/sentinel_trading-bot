@@ -13,8 +13,11 @@
     Un .env = un USUARIO = una cuenta MT5. Los motores que corren sobre esa
     cuenta se declaran en BOTS (p.ej. BOTS=m15,m5); no hay un .env por bot.
     BOT_ID y MAGIC_NUMBER los inyecta el launcher desde MAGIC_M15/MAGIC_M5.
-      2. Tests       - regresion local (no toca MT5 ni Supabase).
-      3. Auditorias  - audit_margin (siempre) y audit_m5_signals (si toca).
+      2. Tests       - regresion local (no toca MT5 ni Supabase); con e2, tambien
+                       la regresion del e2.
+      3. Auditorias  - audit_margin (cuentas m15, siempre), audit_e2 (cuentas e2,
+                       siempre: MT5 accesible + cuenta hedging) y
+                       audit_m5_signals (si toca).
       4. Lanzamiento - una ventana de PowerShell por bot, con la TUI.
 
     Las auditorias son READ-ONLY y su salida se archiva con fecha en
@@ -291,6 +294,17 @@ if ($SkipTests) {
         exit 1
     }
     Write-Ok "regresion en verde"
+    if ($e2.Count -gt 0) {
+        foreach ($t in @("test_e2_engine", "test_e2_robustez", "test_e2_sessions", "test_e2_state",
+                         "test_e2_identity", "test_e2_wiring")) {
+            python -m "tests.$t" | Select-Object -Last 1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "la regresion del e2 ha fallado ($t). Revisa la salida completa con: python -m tests.$t"
+                exit 1
+            }
+        }
+        Write-Ok "regresion del e2 en verde"
+    }
 }
 
 # ==================================================================
@@ -365,6 +379,39 @@ if ($SkipAudits) {
             Pop-Env $prev
         }
     }
+
+    # --- audit_e2: siempre para cada instancia e2 (aunque la cuenta no tenga m15).
+    #     Comprueba que MT5 responde y que la cuenta es hedging (candado opuesto). ---
+    foreach ($inst in $e2) {
+        Write-Host ""
+        Write-Host "  --- cuenta e2: $($inst.Name) ---" -ForegroundColor White
+        $prev = Push-Env $inst.Cfg
+        try {
+            $outE2 = Join-Path $auditDir "e2_$($inst.Name)_$stamp.txt"
+            python -m scripts.audit_e2 | Tee-Object -FilePath $outE2 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "audit_e2 fallo. Sin MT5 accesible no tiene sentido arrancar el e2."
+                Write-Host "         Revisa MT5_PATH / MT5_LOGIN / que el terminal este abierto." -ForegroundColor DarkGray
+                exit 1
+            }
+            Write-Ok "audit_e2 -> $(Split-Path -Leaf $outE2)"
+            $texto = Get-Content $outE2 -Raw
+            foreach ($linea in (Select-String -Path $outE2 -Pattern "modo de cuenta|escalera completa|dos escaleras|VEREDICTO:").Line) {
+                Write-Host "         $($linea.Trim())" -ForegroundColor DarkGray
+            }
+            if ($texto -match "REQUIERE cuenta hedging") {
+                Write-Fail "la cuenta NO es hedging. El e2 necesita los tercios y el candado a la vez."
+                exit 1
+            } elseif ($texto -match "VEREDICTO: NO CABE") {
+                Write-Warn "dos escaleras del e2 NO CABEN en el equity actual (riesgo por defecto 8 %)."
+                Write-Host "         Baja e2_risk_pct en bot_config antes de operar. Detalle en $outE2" -ForegroundColor DarkGray
+                $resp = Read-Host "         Continuar de todos modos? (s/N)"
+                if ($resp -notmatch "^(?i:s|si|y|yes)$") { exit 1 }
+            }
+        } finally {
+            Pop-Env $prev
+        }
+    }
 }
 
 # ==================================================================
@@ -418,8 +465,10 @@ Start-Process powershell -ArgumentList @(
 Write-Host ""
 Write-Host ("=" * 72) -ForegroundColor DarkCyan
 Write-Ok "$($aLanzar.Count) bot(s) lanzado(s). Cada uno en su ventana."
-if ($m5.Count -eq 0) {
-    Write-Host "         Solo M15. Para levantar tambien el M5, pon BOTS=m15,m5 en el .env del usuario." -ForegroundColor DarkGray
+$motores = @($aLanzar | ForEach-Object { $_.BotId } | Select-Object -Unique)
+Write-Host "         Motores lanzados: $($motores -join ', ')." -ForegroundColor DarkGray
+if (($m5.Count -eq 0) -and ($m15.Count -gt 0)) {
+    Write-Host "         Sin M5. Para levantar tambien el M5, pon BOTS=m15,m5 en el .env del usuario." -ForegroundColor DarkGray
 }
 Write-Host "         Cerrar una ventana (Ctrl+C) detiene esa instancia limpiamente." -ForegroundColor DarkGray
 Write-Host "         Auditorias archivadas en logs\audits\" -ForegroundColor DarkGray
