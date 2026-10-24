@@ -35,3 +35,4 @@
 - [Colector de ticks](tick-collector.md) — scripts/tick_collector.py, ticks XAUUSD+ por día en fullsim/data/ticks (fuera de git); tarea SentinelTickCollector sábados 10:00 local; solo con mercado cerrado
 - [Demos viejas desactivadas](demos-viejas-desactivadas.md) — 25-oct: 26275217/21/22 con .env renombrados a «_», bots M15/M5 detenidos, posiciones intactas; el colector de ticks aún usa el terminal de 26275221
 - [Motor e2 tres patas](e2-motor-tres-patas.md) — bot/strategy_e2.py, magic 100300, BOT_ID e2; arranque con BOTS=e2 + start_all.ps1, pata apagable con e2_legs; adopta huerfanas, sin Mom/NFP en feriados EE. UU.; migracion 017 sin aplicar; pendiente de demo; apuntar colector de ticks (--login) a la cuenta nueva
+- [Demos nuevas e2](e2-demos-nuevas.md) — 25-oct: 3 cuentas (3k/10k/25k) provisionadas con BOTS=e2, instancia e2 apagada y riesgo 0,0001; trampa: el provisionador saca credenciales de un .env activo y su default es bots=m15,m5
