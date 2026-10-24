@@ -402,8 +402,11 @@ def trading_loop(db, engine, logger, stop_event=None):
                     engine.is_active = False
                     engine.close_only = True
 
-            if not cfg:
-                # Sin config activa ni cache: nada que gestionar aun.
+            if not cfg and not getattr(engine, "runs_without_cfg", False):
+                # Sin config activa ni cache: nada que gestionar aun. Los motores
+                # con DEFAULTS completos (e2: runs_without_cfg=True) corren igual,
+                # para no dejar sin gestionar salidas si falta la fila; abrir
+                # sigue dependiendo de bot_instances.is_active.
                 time.sleep(2)
                 continue
 

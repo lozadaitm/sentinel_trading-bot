@@ -299,11 +299,24 @@ def _trigger_restart():
               f"Lanza scripts\\restart_all.ps1 (o start_all.ps1) a mano.")
 
 
+# Modulo de consola de cada motor (igual que scripts/run_instance.ps1 sin -UI/-Lite).
+BOT_MODULES = {"m15": "bot.main", "m5": "bot.main_m5", "e2": "bot.main_e2"}
+
+
+def module_for(bot_id):
+    """Modulo de Python del motor; None si el bot_id no existe (no se lanza nada:
+    un motor equivocado operaria la cuenta con otra estrategia)."""
+    return BOT_MODULES.get(str(bot_id).strip().lower())
+
+
 def _start_instance(env_path, bots):
     """Lanza los motores de la instancia en ventanas nuevas (modo consola)."""
     runner = os.path.join(ROOT, "scripts", "run_instance.ps1")
     for bot_id in bots:
-        module = "bot.main_m5" if bot_id == "m5" else "bot.main"
+        module = module_for(bot_id)
+        if module is None:
+            print(f"    motor desconocido '{bot_id}': no se lanza (validos: {sorted(BOT_MODULES)}).")
+            continue
         subprocess.Popen(
             ["powershell", "-NoExit", "-ExecutionPolicy", "Bypass",
              "-File", runner, env_path, "-BotId", bot_id, "-Module", module],
