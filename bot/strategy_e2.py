@@ -60,6 +60,8 @@ DAY = 86400
 OK_RC = (mt5.TRADE_RETCODE_DONE,)
 GONE_RECHECK_S = 5        # re-consulta del historial de un ticket ausente
 RECONCILE_EVERY_S = 3600  # aviso de posiciones sin pata: al arrancar y cada hora
+UNCONFIRMED_GIVEUP_S = 900   # tras la salida, espera maxima por tickets ausentes sin confirmar
+UNCONF_ERR_EVERY_S = 600     # ERROR de ticket sin confirmar: cada 10 min
 OPENING_MISS_READS = 5    # lecturas seguidas sin tercios antes de dar por perdida una apertura
 
 
@@ -162,11 +164,11 @@ class SessionEngine:
                               f"se conserva en memoria y se reintenta.")
             return False
 
-    def _err(self, key, msg, price=0.0, lots=0.0, ticket=0):
-        """ERROR con throttle por clave (una vez por minuto)."""
+    def _err(self, key, msg, price=0.0, lots=0.0, ticket=0, every=ERR_EVERY_S):
+        """ERROR con throttle por clave (por defecto una vez por minuto)."""
         if self.now < self._err_next.get(key, 0):
             return
-        self._err_next[key] = self.now + ERR_EVERY_S
+        self._err_next[key] = self.now + every
         self.log.write("ERROR", msg, price, lots, self.b.account_balance(), ticket=ticket)
 
     def _ok(self, res):
@@ -333,8 +335,14 @@ class SessionEngine:
 
     def _leg_positions(self, e, pos):
         """Posiciones vivas con comentario de esta pata abiertas desde su entrada."""
-        return [p for p in pos if self._leg_comment(e, p.comment or "")
-                and int(p.time) >= int(e["entry_epoch"])]
+        return [p for p in pos if self._leg_comment(e, p.comment or "") and self._in_span(e, p)]
+
+    @staticmethod
+    def _in_span(e, p):
+        """La posicion se abrio dentro de la vida de la pata [entrada, salida): las
+        entradas de dias posteriores nunca casan con una pata vieja."""
+        t = int(p.time)
+        return int(e["entry_epoch"]) <= t < int(e.get("exit_epoch") or e["entry_epoch"] + DAY)
 
     @staticmethod
     def _locks(e):
@@ -373,8 +381,7 @@ class SessionEngine:
         locks = self._locks(e)
         known = {t for t, _ in locks} | {t for t in e["thirds"] if t}
         for p in pos:
-            if p.comment == comment and p.ticket not in known \
-                    and int(p.time) >= int(e["entry_epoch"]):
+            if p.comment == comment and p.ticket not in known and self._in_span(e, p):
                 locks.append([p.ticket, float(p.volume)])
                 self._dirty = True
                 self.log.write("CANDADO", f"Candado {name} adoptado: #{p.ticket} {p.volume:.2f} lotes.",
@@ -452,6 +459,8 @@ class SessionEngine:
         de la pata. closed solo cuando no queda nada vivo ni dudoso."""
         name = LEG_NAMES[e["leg"]]
         all_done = True
+        live_failed = False
+        unconfirmed = []
         targets = [(t, "third") for t in e["thirds"] if t and t not in e["closed_thirds"]]
         targets += [(t, "lock") for t, _ in self._locks(e) if t not in e["closed_locks"]]
         known = {t for t, _ in targets}
@@ -464,6 +473,7 @@ class SessionEngine:
                 res = self.b.close_position(p, f"E2 Salida {name}")
                 if not self._ok(res):
                     all_done = False
+                    live_failed = True
                     self._err(f"close:{t}", f"E2 {name}: cierre de #{t} RECHAZADO (retcode "
                                             f"{getattr(res, 'retcode', None)}); se reintenta.",
                               p.price_current, p.volume, ticket=t)
@@ -473,6 +483,7 @@ class SessionEngine:
                                p.price_current, p.volume, self.b.account_balance(), ticket=t)
             elif not self._gone(t):
                 all_done = False   # ausente sin cierre confirmado: lectura dudosa, se reintenta
+                unconfirmed.append(t)
                 continue
             if kind == "lock":
                 e["closed_locks"].append(t)
@@ -481,6 +492,21 @@ class SessionEngine:
             self._dirty = True
         if all_done:
             self._finish(e, reason)
+            return
+        for t in unconfirmed:
+            self._err(f"unconf:{t}", f"E2 {name}: ticket #{t} ausente de MT5 y sin cierre "
+                                     f"confirmado en el historial tras la salida; se sigue "
+                                     f"esperando.", ticket=t, every=UNCONF_ERR_EVERY_S)
+        if unconfirmed and not live_failed \
+                and self.now >= int(e["exit_epoch"]) + UNCONFIRMED_GIVEUP_S:
+            # Espera acotada: nada vivo de la pata en MT5; los dudosos quedan apuntados.
+            e["unconfirmed"] = sorted(set(e.get("unconfirmed", [])) | set(unconfirmed))
+            self.log.write("WARNING", f"E2 {name}: se da por cerrada sin confirmar en historial "
+                                      f"los tickets {e['unconfirmed']} "
+                                      f"({UNCONFIRMED_GIVEUP_S // 60} min tras la salida, "
+                                      f"sin posiciones vivas de la pata).",
+                           balance=self.b.account_balance())
+            self._finish(e, reason + ", con tickets sin confirmar")
 
     def _finish(self, e, reason):
         e["status"] = "closed"
@@ -500,7 +526,7 @@ class SessionEngine:
         for i in range(3):
             if e["thirds"][i] is None:
                 p = next((p for p in pos if p.comment == f"E2 {name} T{i + 1}"
-                          and int(p.time) >= int(e["entry_epoch"])), None)
+                          and self._in_span(e, p)), None)
                 if p is not None:
                     e["thirds"][i] = p.ticket
                     e["lots"][i] = float(p.volume)
@@ -655,9 +681,8 @@ class SessionEngine:
         if not self._persist():
             # Sin el registro 'opening' en disco, una caida a mitad permitiria reabrir.
             del self.state.legs[k]
-            self.log.write("ERROR", f"E2 {name}: no se pudo persistir la apertura; NO se envian "
-                                    f"ordenes (se reintenta dentro de la ventana).",
-                           balance=balance)
+            self._err(f"presave:{leg}", f"E2 {name}: no se pudo persistir la apertura; NO se "
+                                        f"envian ordenes (se reintenta dentro de la ventana).")
             return
 
         ref = tick.ask if side == 1 else tick.bid

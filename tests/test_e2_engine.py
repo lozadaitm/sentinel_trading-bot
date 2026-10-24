@@ -45,6 +45,7 @@ class E2Broker(FakeBroker):
         self.empty_reads = 0    # lecturas de posiciones que devuelven [] (reconexion MT5)
         self.partial = {}       # prefijo de comentario -> volumen ejecutado (DONE_PARTIAL, una vez)
         self.gone = {}          # ticket -> volumen de las posiciones cerradas (historial)
+        self.history_never = False  # historial que nunca confirma nada (devuelve [])
 
     def positions_checked(self):
         if self.empty_reads > 0:
@@ -53,6 +54,8 @@ class E2Broker(FakeBroker):
         return super().positions_checked()
 
     def history_deals_for_position(self, ticket):
+        if self.history_never:
+            return []
         if ticket in self.gone:
             v = self.gone[ticket]
             return [SimpleNamespace(entry=mt5.DEAL_ENTRY_IN, volume=v),
@@ -524,8 +527,61 @@ def test_persistencia_previa_fallida(d):
         raise OSError("disco lleno")
     r.eng.state.save = nosave
     r.tick(TUE * 86400 + H + 5, 4000.0)
+    r.tick(TUE * 86400 + H + 6, 4000.0)
     check(len(r.br.orders) == 0, "persistencia fallida: no se envian ordenes", r.br.orders)
-    check(any("persistir" in m for m in r.kinds("ERROR")), "persistencia fallida: ERROR")
+    check(len([m for m in r.kinds("ERROR") if "persistir" in m]) == 1,
+          "persistencia fallida: un ERROR (con throttle)", r.kinds("ERROR"))
+
+
+def test_ticket_sin_confirmar_no_contagia(d):
+    """N1: un ticket ausente que el historial nunca confirma no bloquea la pata para
+    siempre ni hace que la pata vieja cierre las entradas del dia siguiente."""
+    import bot.strategy_e2 as se
+    WED = TUE + 1
+    r = opened_bigone(d, "unconf")
+    r.br.history_never = True
+    t1 = r.leg("bigone")["thirds"][0]
+    r.br.external_close(t1)
+    old_giveup = getattr(se, "UNCONFIRMED_GIVEUP_S", 900)
+    se.UNCONFIRMED_GIVEUP_S = 10 ** 9          # primero: la pata vieja sigue atascada
+    try:
+        r.tick(TUE * 86400 + 10 * H, 4000.0)
+        e1 = r.eng.state.legs[f"bigone:{TUE}"]
+        check(e1["status"] != "closed" and not r.br.positions(),
+              "sin confirmar: tras la salida T2/T3 cerrados, la pata espera", e1)
+        errs = lambda: [m for m in r.kinds("ERROR") if f"#{t1}" in m and "sin cierre" in m]
+        check(len(errs()) == 1, "sin confirmar: ERROR con pata y ticket", r.kinds("ERROR"))
+        r.tick(TUE * 86400 + 10 * H + 60, 4000.0)
+        check(len(errs()) == 1, "sin confirmar: ERROR con throttle (no a cada tick)")
+        r.tick(TUE * 86400 + 10 * H + 660, 4000.0)
+        check(len(errs()) == 2, "sin confirmar: el ERROR se repite a los 10 min")
+        r.tick(WED * 86400 + H + 5, 4000.0)       # entra la Big One del miercoles
+        e2 = r.eng.state.legs.get(f"bigone:{WED}")
+        check(e2 and e2["status"] == "open" and len(r.br.positions()) == 3,
+              "dia 2: la Big One nueva entra", e2)
+        r.tick(WED * 86400 + H + 20, 4000.0)
+        check(len(r.br.positions()) == 3 and not [c for c in r.br.closes
+                                                   if c[1] == "E2 Salida BigOne"
+                                                   and c[0] in e2["thirds"]],
+              "dia 2: la pata vieja NO cierra las posiciones nuevas", r.br.closes)
+    finally:
+        se.UNCONFIRMED_GIVEUP_S = old_giveup
+    r.tick(WED * 86400 + H + 30, 4000.0)          # ahora rige el limite de 15 min
+    e1 = r.eng.state.legs[f"bigone:{TUE}"]
+    check(e1["status"] == "closed" and e1.get("unconfirmed") == [t1],
+          "sin confirmar: tras el limite la pata vieja cierra y apunta el ticket", e1)
+    check(any(f"{t1}" in m for m in r.kinds("WARNING")), "sin confirmar: WARNING al darla por cerrada")
+    check(len(r.br.positions()) == 3 and r.eng.state.legs[f"bigone:{WED}"]["status"] == "open",
+          "dia 2: la pata nueva sigue intacta")
+    # Espera acotada con el limite real dentro del mismo dia
+    r2 = opened_bigone(d, "unconf2")
+    r2.br.history_never = True
+    r2.br.external_close(r2.leg("bigone")["thirds"][1])
+    r2.tick(TUE * 86400 + 10 * H, 4000.0)
+    check(r2.leg("bigone")["status"] != "closed", "limite: a las 10:00 aun espera")
+    r2.tick(TUE * 86400 + 10 * H + 900, 4000.0)
+    check(r2.leg("bigone")["status"] == "closed" and r2.leg("bigone").get("unconfirmed"),
+          "limite: a los 15 min cierra con el ticket sin confirmar", r2.leg("bigone"))
 
 
 def test_aviso_posiciones_sueltas(d):
@@ -552,7 +608,8 @@ def main():
                    test_estado_corrupto, test_lectura_vacia_no_cierra,
                    test_salida_lectura_vacia, test_close_all_lectura_fallida,
                    test_adp_no_cuenta, test_ejecucion_parcial, test_excepcion_en_tick,
-                   test_persistencia_previa_fallida, test_aviso_posiciones_sueltas):
+                   test_persistencia_previa_fallida, test_aviso_posiciones_sueltas,
+                   test_ticket_sin_confirmar_no_contagia):
             print(f"[{fn.__name__}]")
             try:
                 fn(d)
