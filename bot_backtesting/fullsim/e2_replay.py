@@ -18,6 +18,15 @@ Camino dentro de la vela (decision documentada):
     O-H-L-C si no, sin ticks en los niveles. Sirve para cuantificar cuanto pesa el camino sintetico.
 Hora de los ticks: open a la hora de la vela, los demas a +1/+2/+3 min (los insertados entre medio).
 
+ALCANCE: el modo sim valida las DECISIONES del motor (entradas, lados, candados, objetivos, salidas)
+ejecutando al precio del tick; NO valida el realismo de los fills (deslizamiento, requotes, spread
+variable, ejecuciones parciales). Eso se mide en la demo con los logs por tercio del motor.
+
+Veredicto por pata (solo modo sim; las filas raw son "referencia"): OK si entradas y lados coinciden
+>= 98 % (sin contar las entradas del simulador en feriados de EE. UU., que el motor omite por regla),
+|dif. media| < 0,05 $/oz y dif. ABSOLUTA media sin los artefactos de horizonte < 0,10 $/oz (los errores
+de signo contrario no se compensan). main() devuelve 1 si alguna pata del modo sim FALLA.
+
 P&L en $/oz por tercio con la misma contabilidad del simulador: precio (incluye el spread de
 entrada y del candado) - comision 0,06 por posicion (tercio y candado) + swap_cost hasta el cierre
 del tercio o hasta el candado (convencion del simulador).
@@ -44,7 +53,9 @@ LEGS = ("bigone", "mom", "nfp")
 PATA = {"bigone": "big_one", "mom": "momentum_eeuu", "nfp": "nfp"}
 EVENT_NAMES = {"NFP": "Non-Farm Employment Change", "CPI": "CPI m/m", "FOMC": "Federal Funds Rate"}
 TOL_PNL = 0.05
+TOL_ABS = 0.10       # dif. absoluta media sin horizonte ($/oz)
 TOL_MATCH = 0.98
+HOLIDAY = "feriado"  # motivo de omision del motor en feriados de EE. UU. (regla, no discrepancia)
 
 
 # ----------------------------------------------------------------------------- datos
@@ -124,6 +135,7 @@ class ReplayBroker:
     def volume_max(self): return 1_000_000.0
     def account_balance(self): return self._balance
     def check_free_margin(self, lots, otype=None): return True
+    def is_hedging_account(self): return True
     def positions_checked(self): return list(self._pos)
     def positions(self): return list(self._pos)
 
@@ -215,6 +227,7 @@ def run_engine(M, events, legs, mode, tmpdir):
     eng._rates_m15 = lambda n: M.m15(eng.now, n)
     eng._rates_d1 = lambda n: M.d1(eng.now, n)
     eng._events = lambda: events
+    eng._calendar_status = lambda day: (True, "")   # el calendario historico es completo
     eng.init_history_cursor()
     seen = {}
 
@@ -321,8 +334,10 @@ def compare(S, E, K, M, label):
         e = E[E.leg == leg].set_index("t") if len(E) else pd.DataFrame()
         ks = set(s.index)
         ke = set(e.index) if len(e) else set()
+        kl = K[K.leg == leg] if len(K) else pd.DataFrame(columns=["t", "reason"])
+        hol = set(kl[kl.reason.astype(str).str.contains(HOLIDAY)].t) & (ks - ke)
         both = sorted(ks & ke)
-        union = ks | ke
+        union = (ks - hol) | ke
         J = s.loc[both].join(e.loc[both], lsuffix="_sim", rsuffix="_eng") if both else pd.DataFrame()
         if len(J):
             J = attribute(J, M, leg)
@@ -330,7 +345,7 @@ def compare(S, E, K, M, label):
         ok_entries = int(same_side.sum()) if len(J) else 0
         agree = ok_entries / len(union) if union else 1.0
         row = dict(modo=label, pata=leg, n_sim=len(ks), n_motor=len(ke), coinciden=len(both),
-                   entradas_y_lados_pct=100 * agree)
+                   n_feriado=len(hol), entradas_y_lados_pct=100 * agree)
         if len(J):
             row["lado_pct"] = 100 * same_side.mean()
             row["candado_pct"] = 100 * (J.locked_sim == J.locked_eng).mean()
@@ -344,17 +359,21 @@ def compare(S, E, K, M, label):
             row["dif_abs_media"] = (J.pnl_eng - J.pnl_sim).abs().mean()
             row["n_horizonte"] = int(J.horizonte.sum())
             row["dif_sin_horizonte"] = J.loc[~J.horizonte, "dif"].mean()
+            row["dif_abs_sin_horizonte"] = J.loc[~J.horizonte, "dif"].abs().mean()
             row["residuo_sin_gap"] = J.loc[~J.horizonte, "residuo"].mean()
             row["residuo_abs_max"] = J.loc[~J.horizonte, "residuo"].abs().max()
         else:
             row["dif_media"] = np.nan
-        row["veredicto"] = "OK" if (agree >= TOL_MATCH and np.isfinite(row["dif_media"])
-                                    and abs(row["dif_media"]) < TOL_PNL) else "FALLA"
+        dabs = row.get("dif_abs_sin_horizonte", np.nan)
+        ok = (agree >= TOL_MATCH and np.isfinite(row["dif_media"]) and abs(row["dif_media"]) < TOL_PNL
+              and np.isfinite(dabs) and dabs < TOL_ABS)
+        row["veredicto"] = ("OK" if ok else "FALLA") if label == "sim" else "referencia"
         summary.append(row)
         joined[leg] = J
         sk = K[K.leg == leg].set_index("t").reason if len(K) else pd.Series(dtype=object)
         for t in sorted(ks - ke):
-            mism.append(dict(modo=label, pata=leg, t=pd.Timestamp(t, unit="s"), tipo="solo simulador",
+            mism.append(dict(modo=label, pata=leg, t=pd.Timestamp(t, unit="s"),
+                             tipo="feriado (regla del motor)" if t in hol else "solo simulador",
                              detalle=sk.get(t, "sin registro en el motor")))
         for t in sorted(ke - ks):
             mism.append(dict(modo=label, pata=leg, t=pd.Timestamp(t, unit="s"), tipo="solo motor",
@@ -449,11 +468,13 @@ def main():
         out["logs"] = {f"{m}:{','.join(l)}": v["logs"] for (m, l), v in res.items()}
     T = pd.concat(tables, ignore_index=True)
     MM = pd.concat(mism_all, ignore_index=True)
-    cols = ["modo", "pata", "n_sim", "n_motor", "coinciden", "entradas_y_lados_pct", "candado_pct",
-            "candado_tercio_pct", "pnl_sim", "pnl_motor", "dif_T1", "dif_T2", "dif_T3", "dif_media",
-            "dif_abs_media", "n_horizonte", "dif_sin_horizonte", "residuo_sin_gap", "residuo_abs_max",
-            "veredicto"]
+    cols = ["modo", "pata", "n_sim", "n_motor", "coinciden", "n_feriado", "entradas_y_lados_pct",
+            "candado_pct", "candado_tercio_pct", "pnl_sim", "pnl_motor", "dif_T1", "dif_T2", "dif_T3",
+            "dif_media", "dif_abs_media", "n_horizonte", "dif_sin_horizonte", "dif_abs_sin_horizonte",
+            "residuo_sin_gap", "residuo_abs_max", "veredicto"]
     print("\nCOMPARACION MOTOR vs SIMULADOR (2025-11-01 -> 2026-10-16), P&L en $/oz por tercio:")
+    print("(modo sim = decisiones del motor ejecutando al precio del tick: NO valida el realismo de los")
+    print(" fills; filas raw = referencia del camino sintetico, sin veredicto)")
     print(T[cols].round(3).to_string(index=False))
     print("\nDiferencias (modo sim):")
     m = MM[MM.modo == "sim"]
@@ -469,6 +490,10 @@ def main():
         print(f"{r.pata}: {r.veredicto} (entradas y lados {r.entradas_y_lados_pct:.1f} %, "
               f"dif P&L media {r.dif_media:+.3f} $/oz)")
     print(f"detalle en {OUT}")
+    falla = [r.pata for r in T[T.modo == "sim"].itertuples() if r.veredicto != "OK"]
+    if falla:
+        print(f"FALLA en modo sim: {falla}")
+        return 1
     return 0
 
 
