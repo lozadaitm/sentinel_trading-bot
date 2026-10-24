@@ -466,6 +466,7 @@ class SessionEngine:
         known = {t for t, _ in targets}
         targets += [(p.ticket, "extra") for p in self._leg_positions(e, pos)
                     if p.ticket not in known]
+        had_live = any(t in by_ticket for t, _ in targets)
         for t, kind in targets:
             p = by_ticket.get(t)
             if p is not None:
@@ -497,14 +498,31 @@ class SessionEngine:
             self._err(f"unconf:{t}", f"E2 {name}: ticket #{t} ausente de MT5 y sin cierre "
                                      f"confirmado en el historial tras la salida; se sigue "
                                      f"esperando.", ticket=t, every=UNCONF_ERR_EVERY_S)
-        if unconfirmed and not live_failed \
-                and self.now >= int(e["exit_epoch"]) + UNCONFIRMED_GIVEUP_S:
-            # Espera acotada: nada vivo de la pata en MT5; los dudosos quedan apuntados.
+        if had_live or live_failed or not unconfirmed:
+            # Algo de la pata se vio vivo en esta lectura: la espera vuelve a empezar.
+            if "unconfirmed_since" in e or "unconfirmed_reads" in e:
+                e.pop("unconfirmed_since", None)
+                e.pop("unconfirmed_reads", None)
+                self._dirty = True
+            return
+        if "unconfirmed_since" not in e:
+            e["unconfirmed_since"] = self.now
+            e["unconfirmed_reads"] = 0
+            self._dirty = True
+        if pos:
+            # Solo cuentan lecturas NO vacias: una lista vacia puede ser una reconexion.
+            e["unconfirmed_reads"] = e.get("unconfirmed_reads", 0) + 1
+            self._dirty = True
+        if e["unconfirmed_reads"] >= OPENING_MISS_READS \
+                and self.now - int(e["unconfirmed_since"]) >= UNCONFIRMED_GIVEUP_S:
+            # Espera acotada: N lecturas no vacias seguidas sin nada vivo de la pata
+            # durante >= 15 min; los tickets dudosos quedan apuntados.
             e["unconfirmed"] = sorted(set(e.get("unconfirmed", [])) | set(unconfirmed))
             self.log.write("WARNING", f"E2 {name}: se da por cerrada sin confirmar en historial "
                                       f"los tickets {e['unconfirmed']} "
-                                      f"({UNCONFIRMED_GIVEUP_S // 60} min tras la salida, "
-                                      f"sin posiciones vivas de la pata).",
+                                      f"({e['unconfirmed_reads']} lecturas no vacias y "
+                                      f"{(self.now - int(e['unconfirmed_since'])) // 60} min sin "
+                                      f"posiciones vivas de la pata).",
                            balance=self.b.account_balance())
             self._finish(e, reason + ", con tickets sin confirmar")
 

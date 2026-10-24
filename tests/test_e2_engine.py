@@ -25,6 +25,7 @@ MAGIC = 100300
 TUE = 19997   # dia de servidor (epoch // 86400) que cae en martes
 FRI = 20000   # viernes
 H = 3600
+OPENING_READS = 5   # = strategy_e2.OPENING_MISS_READS
 
 
 def check(cond, name, detail=""):
@@ -566,22 +567,72 @@ def test_ticket_sin_confirmar_no_contagia(d):
               "dia 2: la pata vieja NO cierra las posiciones nuevas", r.br.closes)
     finally:
         se.UNCONFIRMED_GIVEUP_S = old_giveup
-    r.tick(WED * 86400 + H + 30, 4000.0)          # ahora rige el limite de 15 min
+    for k in range(OPENING_READS):                # ahora rige el limite: N lecturas no vacias
+        r.tick(WED * 86400 + H + 30 + k, 4000.0)
     e1 = r.eng.state.legs[f"bigone:{TUE}"]
     check(e1["status"] == "closed" and e1.get("unconfirmed") == [t1],
           "sin confirmar: tras el limite la pata vieja cierra y apunta el ticket", e1)
-    check(any(f"{t1}" in m for m in r.kinds("WARNING")), "sin confirmar: WARNING al darla por cerrada")
+    check(any("sin confirmar" in m and f"[{t1}]" in m for m in r.kinds("WARNING")),
+          "sin confirmar: WARNING al darla por cerrada", r.kinds("WARNING"))
     check(len(r.br.positions()) == 3 and r.eng.state.legs[f"bigone:{WED}"]["status"] == "open",
           "dia 2: la pata nueva sigue intacta")
-    # Espera acotada con el limite real dentro del mismo dia
-    r2 = opened_bigone(d, "unconf2")
-    r2.br.history_never = True
-    r2.br.external_close(r2.leg("bigone")["thirds"][1])
-    r2.tick(TUE * 86400 + 10 * H, 4000.0)
-    check(r2.leg("bigone")["status"] != "closed", "limite: a las 10:00 aun espera")
-    r2.tick(TUE * 86400 + 10 * H + 900, 4000.0)
-    check(r2.leg("bigone")["status"] == "closed" and r2.leg("bigone").get("unconfirmed"),
-          "limite: a los 15 min cierra con el ticket sin confirmar", r2.leg("bigone"))
+
+
+def test_vuelta_tras_salida_lectura_vacia(d):
+    """N1c (1): bot caido durante la salida, vuelve a los +20 min con una lectura
+    vacia -> la pata NO se da por cerrada; la siguiente lectura normal cierra todo."""
+    path = fresh_path(d, "late_empty")
+    r = Rig(path)
+    r.tick(TUE * 86400 + H + 5, 4000.0)
+    r.restart(path)
+    r.br.empty_reads = 1
+    r.tick(TUE * 86400 + 10 * H + 20 * 60, 4000.0)
+    check(r.leg("bigone")["status"] != "closed" and len(r.br.positions()) == 3,
+          "vuelta +20 min con lectura vacia: la pata NO se cierra", r.leg("bigone"))
+    r.tick(TUE * 86400 + 10 * H + 20 * 60 + 1, 4000.0)
+    check(not r.br.positions() and r.leg("bigone")["status"] == "closed"
+          and not r.leg("bigone").get("unconfirmed"),
+          "siguiente lectura normal: cierra las posiciones vivas", r.br.positions())
+
+
+def test_lecturas_vacias_persistentes(d):
+    """N1c (2): 30 min de lecturas vacias tras la salida no cierran la pata."""
+    r = opened_bigone(d, "empty30")
+    r.br.empty_reads = 10 ** 6
+    for m in range(0, 31):
+        r.tick(TUE * 86400 + 10 * H + m * 60, 4000.0)
+    check(r.leg("bigone")["status"] != "closed" and len(r.br.positions()) == 3,
+          "30 min de lecturas vacias: la pata sigue abierta", r.leg("bigone"))
+    r.br.empty_reads = 0
+    r.tick(TUE * 86400 + 10 * H + 31 * 60, 4000.0)
+    check(not r.br.positions() and r.leg("bigone")["status"] == "closed",
+          "al volver las lecturas normales: cierra todo")
+
+
+def test_abandono_legitimo(d):
+    """N1c (3): ticket realmente cerrado, historial que nunca confirma y lecturas
+    no vacias sin el durante > 15 min -> se da por cerrada con WARNING."""
+    br = E2Broker()
+    br._pos.append(FakePos(77, mt5.POSITION_TYPE_BUY, 0.05, 4000.0, TUE * 86400,
+                           "manual", MAGIC))   # mantiene las lecturas no vacias
+    r = Rig(fresh_path(d, "giveup"), br=br)
+    r.tick(TUE * 86400 + H + 5, 4000.0)
+    r.br.history_never = True
+    t2 = r.leg("bigone")["thirds"][1]
+    r.br.external_close(t2)
+    r.tick(TUE * 86400 + 10 * H, 4000.0)       # cierra T1 y T3; T2 queda sin confirmar
+    check(r.leg("bigone")["status"] != "closed" and [p.ticket for p in r.br.positions()] == [77],
+          "abandono: a las 10:00 cierra lo vivo y espera por T2", r.br.positions())
+    for m in range(1, 10):
+        r.tick(TUE * 86400 + 10 * H + m * 60, 4000.0)
+    check(r.leg("bigone")["status"] != "closed", "abandono: antes de 15 min aun espera")
+    r.tick(TUE * 86400 + 10 * H + 17 * 60, 4000.0)
+    e = r.leg("bigone")
+    check(e["status"] == "closed" and e.get("unconfirmed") == [t2],
+          "abandono: tras 15 min y N lecturas cierra con el ticket apuntado", e)
+    check(any("sin confirmar" in m for m in r.kinds("WARNING")), "abandono: WARNING",
+          r.kinds("WARNING"))
+    check([p.ticket for p in r.br.positions()] == [77], "abandono: la posicion ajena sigue intacta")
 
 
 def test_aviso_posiciones_sueltas(d):
@@ -609,7 +660,9 @@ def main():
                    test_salida_lectura_vacia, test_close_all_lectura_fallida,
                    test_adp_no_cuenta, test_ejecucion_parcial, test_excepcion_en_tick,
                    test_persistencia_previa_fallida, test_aviso_posiciones_sueltas,
-                   test_ticket_sin_confirmar_no_contagia):
+                   test_ticket_sin_confirmar_no_contagia,
+                   test_vuelta_tras_salida_lectura_vacia, test_lecturas_vacias_persistentes,
+                   test_abandono_legitimo):
             print(f"[{fn.__name__}]")
             try:
                 fn(d)
