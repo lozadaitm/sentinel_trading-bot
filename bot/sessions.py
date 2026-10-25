@@ -145,6 +145,24 @@ def add_market_bars(t, n):
     return cur + SLOT
 
 
+def market_seconds(a, b):
+    """Segundos de mercado abierto (lunes a viernes, 01:00-24:00 servidor) en [a, b).
+    Sirve para medir la antiguedad del calendario sin contar el fin de semana ni el
+    corte diario. Rangos de mas de 30 dias se devuelven tal cual (b - a)."""
+    a, b = int(a), int(b)
+    if b <= a:
+        return 0
+    if b - a > 30 * 86400:
+        return b - a
+    total = 0
+    for day in range(a // 86400, b // 86400 + 1):
+        if (day + 3) % 7 >= 5:
+            continue
+        lo, hi = max(a, day * 86400 + 3600), min(b, (day + 1) * 86400)
+        total += max(0, hi - lo)
+    return total
+
+
 def exit_epoch(leg, entry_epoch, nfp_bars=96):
     """Hora de salida de la pata (epoch de servidor)."""
     day0 = (int(entry_epoch) // 86400) * 86400

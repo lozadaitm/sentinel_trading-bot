@@ -97,6 +97,17 @@ def main():
     check(s.add_market_bars(ep("2026-10-22 16:30"), 96) == ep("2026-10-23 17:30"), "bars jueves")
     check(s.add_market_bars(ep("2026-10-23 16:30"), 96) == ep("2026-10-26 17:30"), "bars viernes -> lunes")
 
+    # market_seconds (antiguedad del calendario sin fin de semana ni corte diario)
+    check(s.market_seconds(ep("2026-10-23 23:57"), ep("2026-10-26 01:00")) == 180,
+          "mercado: viernes 23:57 -> lunes 01:00 = 3 min")
+    check(s.market_seconds(ep("2026-10-23 23:57"), ep("2026-10-26 01:02")) == 300,
+          "mercado: viernes 23:57 -> lunes 01:02 = 5 min")
+    check(s.market_seconds(ep("2026-10-20 23:00"), ep("2026-10-21 02:00")) == 2 * 3600,
+          "mercado: corte diario 00:00-01:00 no cuenta")
+    check(s.market_seconds(ep("2026-10-20 10:00"), ep("2026-10-20 17:00")) == 7 * 3600,
+          "mercado: dentro del dia cuenta todo")
+    check(s.market_seconds(ep("2026-10-20 10:00"), ep("2026-10-20 09:00")) == 0, "mercado: b < a -> 0")
+
     # us_no_entry_day (feriados y cierres anticipados de EE. UU.)
     def day(txt):
         return ep(txt) // 86400

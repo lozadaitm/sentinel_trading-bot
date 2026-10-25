@@ -77,6 +77,11 @@ CAL_ERR_EVERY_S = 600        # ERROR de calendario no fiable: cada 10 min
 NO_TICK_S = 60               # segundos de reloj sin tick nuevo (en horario de mercado) -> ERROR
 NO_TICK_ERR_EVERY_S = 600    # ERROR de "sin ticks": cada 10 min de reloj
 HEDGE_RECHECK_S = 3600       # cuenta no hedging: se vuelve a comprobar cada hora
+# El broker cotiza desde las 01:00 pero acepta ordenes desde las 01:01: si la primera
+# orden vuelve con "mercado cerrado" (10018) la pata se reintenta cada 5 s, hasta 10 min.
+MARKET_CLOSED_RC = getattr(mt5, "TRADE_RETCODE_MARKET_CLOSED", 10018)
+MARKET_CLOSED_RETRY_S = 600
+MARKET_CLOSED_EVERY_S = 5
 NFP_LATE_EXIT_S = 19 * 3600 + 45 * 60   # salida NFP en dia de cierre anticipado despues de 19:45
 
 
@@ -141,6 +146,7 @@ class SessionEngine:
         self._pruned_day = None
         self._block_pending = False   # estado ilegible al cargar: bloquear el dia en curso
         self._blocked_day = None      # dia de servidor sin entradas nuevas
+        self._mc_retry = {}           # (pata, dia) -> proximo reintento tras "mercado cerrado"
         self._hedging = None          # True/False/None (sin comprobar o lectura fallida)
         self._hedging_next = 0
         self._last_tick_key = None    # (time, bid, ask) del ultimo tick distinto
@@ -220,9 +226,12 @@ class SessionEngine:
         ga = int(self.news._generated_at or 0)
         if ga <= 0:
             return False, "calendario no disponible"
-        age = self.now - ga
+        # Antiguedad en horas de mercado: el exportador sella con la hora del ultimo
+        # tick, que el fin de semana se queda en el viernes; el lunes a las 01:00 el
+        # calendario no es viejo, solo no se ha refrescado todavia.
+        age = sessions.market_seconds(ga, self.now)
         if age > CAL_MAX_AGE_S:
-            return False, f"calendario generado hace {age / 3600:.1f} h"
+            return False, f"calendario generado hace {age / 3600:.1f} h de mercado"
         evs = self.news._events
         if not evs or not (int(evs[0]["time"]) // DAY <= day <= int(evs[-1]["time"]) // DAY):
             return False, "el calendario no cubre el dia de hoy"
@@ -975,7 +984,15 @@ class SessionEngine:
                     self._skip(leg, start, f"la salida ({self._hhmm(ex)}) cae en feriado EE. UU. "
                                            f"despues de las 19:45")
                     continue
-            if self.now >= start + grace:
+            retry_at = self._mc_retry.get((leg, day))
+            if retry_at is not None:
+                if self.now >= start + MARKET_CLOSED_RETRY_S:
+                    self._skip(leg, start, f"el broker siguio respondiendo 'mercado cerrado' "
+                                           f"hasta {self._hhmm(start + MARKET_CLOSED_RETRY_S)}")
+                    continue
+                if self.now < retry_at:
+                    continue
+            elif self.now >= start + grace:
                 self._skip(leg, start, f"ventana {self._hhmm(start)} pasada sin tick dentro de "
                                        f"los {grace} s")
                 continue
@@ -1113,6 +1130,21 @@ class SessionEngine:
                 ref, spread = ref_i, spread_i
             res = self.b.market_order(otype, lots[i], f"E2 {name} T{i + 1}", sl=0.0, tp=0.0)
             got_i = self._filled(res, lots[i])
+            if i == 0 and got_i <= 0 and getattr(res, "retcode", None) == MARKET_CLOSED_RC:
+                # Aun no abre la sesion de trading: nada entro, se deshace el registro
+                # 'opening' y se reintenta en unos segundos (ver MARKET_CLOSED_RETRY_S).
+                del self.state.legs[k]
+                self._dirty = True
+                self._persist()
+                first = (leg, day) not in self._mc_retry
+                self._mc_retry[(leg, day)] = self.now + MARKET_CLOSED_EVERY_S
+                if first:
+                    self.log.write("SYSTEM", f"E2 {name}: el broker aun no acepta ordenes "
+                                             f"(retcode {MARKET_CLOSED_RC}, mercado cerrado); se "
+                                             f"reintenta cada {MARKET_CLOSED_EVERY_S} s hasta las "
+                                             f"{self._hhmm(start + MARKET_CLOSED_RETRY_S)}.",
+                                   ref_i, lots[i], balance)
+                return
             if got_i <= 0:
                 e["lots"][i] = 0.0
                 self.log.write("ERROR", f"E2 {name} T{i + 1} RECHAZADA (retcode "

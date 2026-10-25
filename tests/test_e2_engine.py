@@ -49,6 +49,7 @@ class E2Broker(FakeBroker):
         self.history_never = False  # historial que nunca confirma nada (devuelve [])
         self.hedging = True         # modo de margen de la cuenta (None = lectura fallida)
         self.none_result = {}       # prefijo -> cuantas ordenes devuelven None pero SI entran
+        self.reject_rc = 10019      # retcode de los rechazos programados (10018 = mercado cerrado)
 
     def is_hedging_account(self):
         return self.hedging
@@ -83,7 +84,7 @@ class E2Broker(FakeBroker):
                 self.reject[pref] = n - 1
                 self.orders.append({"type": otype, "lots": lots, "comment": comment,
                                     "sl": sl, "rejected": True})
-                return SimpleNamespace(retcode=10019, order=0)
+                return SimpleNamespace(retcode=self.reject_rc, order=0)
         none_pref = next((pref for pref, n in self.none_result.items()
                           if n > 0 and comment.startswith(pref)), None)
         part = next((pref for pref in self.partial if comment.startswith(pref)), None)
@@ -221,6 +222,48 @@ def test_bigone_omitida_sin_tick(d):
     r2.tick(TUE * 86400 + H + 300)
     check(len(r2.br.orders) == 0 and not r2.eng.state.legs,
           "close_only: no abre ni marca omitida", r2.eng.state.legs)
+
+
+def test_mercado_cerrado_reintenta(d):
+    """El broker cotiza desde las 01:00 pero opera desde las 01:01: 10018 -> reintento."""
+    br = E2Broker(balance=10000.0)
+    br.reject_rc, br.reject = 10018, {"E2 BigOne T1": 2}
+    r = Rig(fresh_path(d, "mc"), br=br)
+    r.tick(TUE * 86400 + H + 5, 4000.0)
+    check(len(br.orders) == 1 and r.eng.state.legs.get(f"bigone:{TUE}") is None,
+          "cerrado: 1 rechazo y sin registro de la pata", (br.orders, r.eng.state.legs))
+    check(any("aun no acepta" in m for m in r.kinds("SYSTEM")), "cerrado: aviso de reintento",
+          r.lg.events)
+    r.tick(TUE * 86400 + H + 7)
+    check(len(br.orders) == 1, "cerrado: espera 5 s entre intentos", br.orders)
+    r.tick(TUE * 86400 + H + 11)
+    check(len(br.orders) == 2, "cerrado: segundo intento rechazado", br.orders)
+    r.tick(TUE * 86400 + H + 61)
+    e = r.leg("bigone")
+    check(e and e["status"] == "open" and len([o for o in br.orders if not o.get("rejected")]) == 3,
+          "cerrado: a las 01:01 entra la escalera completa (pasada la gracia de 60 s)", br.orders)
+    check(len([m for m in r.kinds("SYSTEM") if "aun no acepta" in m]) == 1,
+          "cerrado: el aviso sale una sola vez", r.lg.events)
+    # Nunca abre: se omite a los 10 minutos
+    br2 = E2Broker(balance=10000.0)
+    br2.reject_rc, br2.reject = 10018, {"E2 BigOne T1": 10 ** 6}
+    r2 = Rig(fresh_path(d, "mc2"), br=br2)
+    for k in range(0, 700, 5):
+        r2.tick(TUE * 86400 + H + 5 + k, 4000.0)
+    e2 = r2.eng.state.legs.get(f"bigone:{TUE}")
+    check(e2 and e2["status"] == "skipped" and "mercado cerrado" in e2.get("reason", ""),
+          "cerrado: a los 10 min se omite", e2)
+    n = len(br2.orders)
+    r2.tick(TUE * 86400 + H + 800)
+    check(len(br2.orders) == n and n <= 125, "cerrado: tras omitir no reintenta", n)
+    # Otro rechazo (no 10018) sigue sin reintentar
+    br3 = E2Broker(balance=10000.0)
+    br3.reject = {"E2 BigOne": 3}
+    r3 = Rig(fresh_path(d, "mc3"), br=br3)
+    r3.tick(TUE * 86400 + H + 5, 4000.0)
+    r3.tick(TUE * 86400 + H + 30)
+    check(len(br3.orders) == 3 and r3.leg("bigone")["status"] == "skipped",
+          "rechazo 10019: no se reintenta", br3.orders)
 
 
 def test_objetivos_cierran_tercios(d):
@@ -670,7 +713,7 @@ def main():
     config.ALERT_EMAIL_TO = ""
     with tempfile.TemporaryDirectory() as d:
         for fn in (test_bigone_entra_una_vez, test_bigone_omitida_sin_tick,
-                   test_objetivos_cierran_tercios, test_candado, test_candado_fallido_reintenta,
+                   test_mercado_cerrado_reintenta, test_objetivos_cierran_tercios, test_candado, test_candado_fallido_reintenta,
                    test_salida_cierra_todo_con_candado, test_salida_cierre_fallido_reintenta,
                    test_reinicio, test_arranque_tras_salida, test_momentum_umbral,
                    test_nfp_viernes, test_close_all, test_recuperacion_tras_caida,
