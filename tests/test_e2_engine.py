@@ -264,6 +264,10 @@ def test_mercado_cerrado_reintenta(d):
     r3.tick(TUE * 86400 + H + 30)
     check(len(br3.orders) == 3 and r3.leg("bigone")["status"] == "skipped",
           "rechazo 10019: no se reintenta", br3.orders)
+    with open(r3.eng.state.path, encoding="utf-8") as f:
+        disk = json.load(f)
+    check(disk.get(f"bigone:{TUE}", {}).get("status") == "skipped",
+          "rechazo 10019: el disco guarda 'skipped' (no 'opening')", disk)
 
 
 def test_objetivos_cierran_tercios(d):

@@ -1166,6 +1166,10 @@ class SessionEngine:
         if fill is None:
             e["status"] = "skipped"
             e["reason"] = "ninguna orden de la escalera entro"
+            # Sin esto el disco se queda con 'opening' y, tras un reinicio, la pata se
+            # trata como apertura interrumpida.
+            self._dirty = True
+            self._persist()
             self.log.write("OMITIDA", f"E2 {name}: ninguna de las 3 ordenes entro.", ref, 0, balance)
             return
         self._arm(e, fill)
