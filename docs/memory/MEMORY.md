@@ -39,3 +39,4 @@
 - [Pendientes e2](pendientes-e2.md) — si e2 funciona: registro con bots=e2 por defecto (hoy se cambia a mano); feriados Columbus/Veterans; guarda de lectura vacía; dividir strategy_e2.py; dashboard sin e2; colector de ticks a cuenta nueva
 - [Sesion de trading 01:01](broker-sesion-trading-0101.md) — XAUUSD+ cotiza 01:00 pero opera desde 01:01; Big One reintenta ante 10018; ~14 % menos ventaja
 - [Recargas e2 descartadas](e2-recargas-descartadas.md) — recargar en el mínimo, ML del fondo y reentrada al volver: nada pasa; riesgo 8 % se mantiene (2026-10-27)
+- [Optimización e2 descartada](e2-optimizacion-descartada.md) — ~12 000 variantes (salidas, tamaño, régimen, entradas, patas, IA): los 3 candidatos fracasan en 2026; e2 sin cambios (2026-10-27)

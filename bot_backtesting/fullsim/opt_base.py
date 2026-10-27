@@ -31,7 +31,8 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
 RESULTS = os.path.join(HERE, "results")
-REGISTRY = os.path.join(RESULTS, "opt_registry.csv")
+REGISTRY = os.path.join(RESULTS, "opt_registry.csv")          # formato viejo (hasta el 27-oct, linea B)
+REGISTRY_JSONL = os.path.join(RESULTS, "opt_registry.jsonl")
 
 # ------------------------------------------------------------------ periodos
 SEL = (pd.Timestamp("2022-10-01"), pd.Timestamp("2025-01-01"))
@@ -459,16 +460,47 @@ def compare(C, B, per, label="", f=RISK, bal0=BAL, wcol="w", boot=True):
 
 
 def register(line, variant, res, params=""):
-    """Anota la variante en el registro global (una fila por variante y periodo evaluado)."""
+    """Anota la variante en el registro global (una fila JSON por variante y periodo evaluado).
+    JSON por linea: cada fila lleva sus propios campos (el CSV anterior se descuadraba entre lineas)."""
+    import json
     row = dict(ts=pd.Timestamp.now().isoformat(timespec="seconds"), line=line, variant=variant, params=str(params))
-    row.update({k: v for k, v in res.items() if not isinstance(v, (list, dict))})
-    df = pd.DataFrame([row])
-    for _ in range(20):                                   # varios procesos pueden escribir a la vez
+    for k, v in res.items():
+        if isinstance(v, (list, dict)):
+            continue
+        row[k] = v.item() if hasattr(v, "item") else v
+    txt = json.dumps(row, default=str) + "\n"
+    for _ in range(40):                                   # varios procesos pueden escribir a la vez
         try:
-            df.to_csv(REGISTRY, mode="a", header=not os.path.exists(REGISTRY), index=False)
+            with open(REGISTRY_JSONL, "a", encoding="utf-8") as fh:
+                fh.write(txt)
             return
         except PermissionError:
-            _time.sleep(0.5)
+            _time.sleep(0.25)
+
+
+def load_registry():
+    """Registro completo: filas JSON nuevas + CSV viejo (primeras 23 columnas comunes; p si la fila trae bootstrap)."""
+    import csv, json
+    rows = []
+    if os.path.exists(REGISTRY):
+        with open(REGISTRY, encoding="utf-8") as fh:
+            rd = csv.reader(fh); head = next(rd)
+            for r in rd:
+                d = dict(zip(head[:23], r[:23]))
+                d["p"] = r[23] if len(r) >= 30 else ""
+                rows.append(d)
+    if os.path.exists(REGISTRY_JSONL):
+        with open(REGISTRY_JSONL, encoding="utf-8") as fh:
+            for x in fh:
+                try:
+                    rows.append(json.loads(x))
+                except ValueError:                        # linea rota por escrituras simultaneas
+                    pass
+    R = pd.DataFrame(rows)
+    for c in ("mar_ratio", "p", "mar_c", "mar_b"):
+        if c in R:
+            R[c] = pd.to_numeric(R[c], errors="coerce")
+    return R
 
 
 # ------------------------------------------------------------------ estadistica de pruebas multiples
