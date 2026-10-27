@@ -38,3 +38,4 @@
 - [Demos nuevas e2](e2-demos-nuevas.md) — 25-oct: 3 cuentas (3k/10k/25k) provisionadas con BOTS=e2, instancia e2 apagada y riesgo 0,0001; trampa: el provisionador saca credenciales de un .env activo y su default es bots=m15,m5
 - [Pendientes e2](pendientes-e2.md) — si e2 funciona: registro con bots=e2 por defecto (hoy se cambia a mano); feriados Columbus/Veterans; guarda de lectura vacía; dividir strategy_e2.py; dashboard sin e2; colector de ticks a cuenta nueva
 - [Sesion de trading 01:01](broker-sesion-trading-0101.md) — XAUUSD+ cotiza 01:00 pero opera desde 01:01; Big One reintenta ante 10018; ~14 % menos ventaja
+- [Recargas e2 descartadas](e2-recargas-descartadas.md) — recargar en el mínimo, ML del fondo y reentrada al volver: nada pasa; riesgo 8 % se mantiene (2026-10-27)
